@@ -36,6 +36,6 @@ type Message struct {
 	Sender        Sender
 	Timestamp     int64
 	MentionedSelf bool // 是否明确 @ 了机器人
-	Content       []
-	Original  any // 原始事件
+	Content       []Message
+	Original      any // 原始事件
 }
