@@ -30,12 +30,12 @@ type Sender struct {
 type Message struct {
 	MessageID     string // 平台消息 ID
 	Platform      Platform
-	MessageType   Message
+	MessageType   MessageType
 	ChatID        string // 会话 ID（OneBot group_id/user_id，飞书 chat_id）
 	SelfID        string // 机器人自身 ID
 	Sender        Sender
 	Timestamp     int64
 	MentionedSelf bool // 是否明确 @ 了机器人
-	Content       []Message
+	Content       []MessagePart
 	Original      any // 原始事件
 }

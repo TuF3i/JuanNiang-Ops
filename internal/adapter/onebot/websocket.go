@@ -32,13 +32,13 @@ func (r *Server) OnOpen(socket *gws.Conn) {
 	r.conns[socket] = uuid
 }
 
-func (r *Server) OnClose(socket *gws.Conn) {
+func (r *Server) OnClose(socket *gws.Conn, _ error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	delete(r.conns, socket)
 }
 
-func (r *Server) OnMessage(socket *gws.Conn) {
+func (r *Server) OnMessage(socket *gws.Conn, message *gws.Message) {
 
 }
