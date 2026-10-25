@@ -1,12 +1,12 @@
-package adapter
+package common
 
 // 平台标识
 type Platform string
 
 // 平台列表
 const (
-	Feishu = "platform.feishu"
-	Onebot = "platform.onebot"
+	Feishu Platform = "platform.feishu"
+	Onebot Platform = "platform.onebot"
 )
 
 // 消息类型
@@ -14,8 +14,8 @@ type MessageType string
 
 // 消息类型列表
 const (
-	Private = "message.private"
-	Group   = "message.public"
+	Private MessageType = "message.private"
+	Group   MessageType = "message.public"
 )
 
 // 消息发送者

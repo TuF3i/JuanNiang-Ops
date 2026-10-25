@@ -1,44 +1,32 @@
 package onebot
 
 import (
-	"sync"
-	"uuid"
-
 	"github.com/lxzan/gws"
 )
 
+// Server gws 事件处理器, 负责连接事件与原始消息的接收
 type Server struct {
 	gws.BuiltinEventHandler
-	rootController *Adapter
-	mu             sync.RWMutex
-	conns          map[*gws.Conn]string
-	RemoteAddr     string
-	SelfID         string
+	root *Adapter
 }
 
-func NewWsServer(rootController *Adapter) *Server {
-	return &Server{
-		rootController: rootController,
-		mu:             sync.RWMutex{},
-		conns:          make(map[*gws.Conn]string),
-	}
+// NewWsServer 创建 gws 事件处理器
+func NewWsServer(root *Adapter) *Server {
+	return &Server{root: root}
 }
 
-func (r *Server) OnOpen(socket *gws.Conn) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	uuid := uuid.NewV4().String()
-	r.conns[socket] = uuid
+// OnOpen 连接建立
+func (s *Server) OnOpen(socket *gws.Conn) {
+	s.root.onConnOpen(socket)
 }
 
-func (r *Server) OnClose(socket *gws.Conn, _ error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	delete(r.conns, socket)
+// OnClose 连接关闭
+func (s *Server) OnClose(socket *gws.Conn, err error) {
+	s.root.onConnClose(socket, err)
 }
 
-func (r *Server) OnMessage(socket *gws.Conn, message *gws.Message) {
-
+// OnMessage 收到原始上报数据
+func (s *Server) OnMessage(socket *gws.Conn, message *gws.Message) {
+	defer message.Close()
+	s.root.onPayload(socket, message.Bytes())
 }

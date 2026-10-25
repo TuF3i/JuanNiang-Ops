@@ -1,29 +1,31 @@
-package adapter
+package common
 
+// MessageMIME 消息部件类型标识
 type MessageMIME string
 
+// 部件类型列表
 const (
-	Text       = "message.mime.text"
-	Mention    = "message.mime.mention"
-	MentionALL = "message.mime.mention.all"
-	Image      = "message.mime.image"
-	File       = "message.mime.file"
-	Reply      = "message.mime.reply"
+	Text       MessageMIME = "message.mime.text"
+	Mention    MessageMIME = "message.mime.mention"
+	MentionALL MessageMIME = "message.mime.mention.all"
+	Image      MessageMIME = "message.mime.image"
+	File       MessageMIME = "message.mime.file"
+	Reply      MessageMIME = "message.mime.reply"
 )
 
-// 消息内容部件
+// MessagePart 消息内容部件
 type MessagePart interface {
-	PartType() string
+	PartType() MessageMIME
 }
 
-// Text部件
+// TextPart 文本部件
 type TextPart struct {
 	Text string
 }
 
 func (TextPart) PartType() MessageMIME { return Text }
 
-// Mention 部件
+// MentionPart Mention 部件
 type MentionPart struct {
 	UserID   string
 	UserName string
@@ -31,12 +33,12 @@ type MentionPart struct {
 
 func (MentionPart) PartType() MessageMIME { return Mention }
 
-// MentionAll 部件（at所有人）
+// MentionAllPart MentionAll 部件（at所有人）
 type MentionAllPart struct{}
 
 func (MentionAllPart) PartType() MessageMIME { return MentionALL }
 
-// Image 部件
+// ImagePart 图片部件
 type ImagePart struct {
 	URL      string // 远程地址
 	FileID   string // 平台文件标识（OneBot file，飞书 image_key）
@@ -45,7 +47,7 @@ type ImagePart struct {
 
 func (ImagePart) PartType() MessageMIME { return Image }
 
-// File 部件
+// FilePart 文件部件
 type FilePart struct {
 	Name     string
 	URL      string
@@ -56,7 +58,7 @@ type FilePart struct {
 
 func (FilePart) PartType() MessageMIME { return File }
 
-// Reply 部件
+// ReplyPart 回复部件
 type ReplyPart struct {
 	MessageID string
 }
