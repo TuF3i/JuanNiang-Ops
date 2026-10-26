@@ -1,6 +1,7 @@
 package onebot
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -81,7 +82,7 @@ type Adapter struct {
 	conns map[*gws.Conn]*peer // conn -> peer
 
 	listener net.Listener
-	wsServer *gws.Server
+	upgrader *gws.Upgrader
 	handler  *Server
 
 	running bool
@@ -131,7 +132,7 @@ func (r *Adapter) Start() error {
 	r.done = make(chan struct{})
 	r.listener = listener
 	r.handler = NewWsServer(r)
-	r.wsServer = gws.NewServer(r.handler, &gws.ServerOption{
+	r.upgrader = gws.NewUpgrader(r.handler, &gws.ServerOption{
 		Authorize: r.authorize,
 	})
 	r.running = true
@@ -268,12 +269,39 @@ func (r *Adapter) SendPrivateMsg(userID int64, segments ...Segment) error {
 	})
 }
 
-// runWebSocket 阻塞运行 gws 服务, Stop 关闭 listener 后自然返回
+// runWebSocket accept 循环. 不使用 gws.RunListener —— 它在 listener 关闭后
+// 不会退出, 会在 accept 错误上无限循环刷日志 (吃 CPU/内存).
 func (r *Adapter) runWebSocket() {
 	defer r.wg.Done()
-	if err := r.wsServer.RunListener(r.listener); err != nil && !r.stopped() {
-		log.Printf("[onebot] websocket server error: %v", err)
+	for {
+		conn, err := r.listener.Accept()
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			log.Printf("[onebot] accept error: %v", err)
+			continue
+		}
+		go r.handleConn(conn)
 	}
+}
+
+// handleConn 读取握手请求并升级为 WebSocket 连接, 之后阻塞在读循环
+func (r *Adapter) handleConn(conn net.Conn) {
+	br := bufio.NewReader(conn)
+	req, err := http.ReadRequest(br)
+	if err != nil {
+		log.Printf("[onebot] bad handshake from %s: %v", conn.RemoteAddr(), err)
+		_ = conn.Close()
+		return
+	}
+	socket, err := r.upgrader.UpgradeFromConn(conn, br, req)
+	if err != nil {
+		// 升级失败 (含鉴权不通过) 时, UpgradeFromConn 内部已写回错误响应并关闭连接
+		log.Printf("[onebot] upgrade from %s: %v", conn.RemoteAddr(), err)
+		return
+	}
+	socket.ReadLoop()
 }
 
 // dispatchLoop 消费发送指令管道, 将动作路由给目标客户端
@@ -405,19 +433,6 @@ func (r *Adapter) snapshotConns() []*gws.Conn {
 		conns = append(conns, conn)
 	}
 	return conns
-}
-
-// stopped 报告适配器是否已停止
-func (r *Adapter) stopped() bool {
-	if r.done == nil {
-		return false
-	}
-	select {
-	case <-r.done:
-		return true
-	default:
-		return false
-	}
 }
 
 // onConnOpen 注册新连接 (由 Server.OnOpen 调用)
