@@ -17,6 +17,7 @@ import (
 	"github.com/lxzan/gws"
 
 	"JuanNiang-Ops/internal/adapter/common"
+	"JuanNiang-Ops/pkg/uerr"
 )
 
 // Config OneBot 正向 WebSocket 适配器配置
@@ -28,35 +29,6 @@ type Config struct {
 
 	MessageBuffer int // 接收消息管道缓冲大小, 默认 256
 	ActionBuffer  int // 发送指令管道缓冲大小, 默认 64
-}
-
-// 适配器状态与路由错误
-var (
-	ErrDisabled      = errors.New("onebot: adapter is disabled")
-	ErrRunning       = errors.New("onebot: adapter is already running")
-	ErrNotRunning    = errors.New("onebot: adapter is not running")
-	ErrNoPeer        = errors.New("onebot: no client connected")
-	ErrUnknownPeer   = errors.New("onebot: target client not connected")
-	ErrAmbiguousPeer = errors.New("onebot: multiple clients connected, target required")
-)
-
-// Action 发送给 OneBot 实现端的 API 动作
-type Action struct {
-	Action string         `json:"action"`
-	Params map[string]any `json:"params,omitempty"`
-	Echo   string         `json:"echo,omitempty"`
-
-	Target string `json:"-"` // 目标机器人 self_id, 为空时自动路由
-}
-
-// ApiResult OneBot API 调用回执
-type ApiResult struct {
-	Status  string          `json:"status"`  // ok / async / failed
-	RetCode int             `json:"retcode"` // 0 表示成功
-	Data    json.RawMessage `json:"data"`    // 回执数据
-	Message string          `json:"message"`
-	Wording string          `json:"wording"`
-	Echo    string          `json:"echo"`
 }
 
 // peer 一个接入的 OneBot 客户端 (机器人端)
@@ -112,13 +84,13 @@ func NewAdapter(cfg Config) *Adapter {
 // Start 启动适配器: 监听端口, 建立收发管道. 重复调用返回 ErrRunning.
 func (r *Adapter) Start() error {
 	if !r.cfg.Enable {
-		return ErrDisabled
+		return uerr.ErrDisabled
 	}
 
 	r.mu.Lock()
 	if r.running {
 		r.mu.Unlock()
-		return ErrRunning
+		return uerr.ErrRunning
 	}
 
 	listener, err := net.Listen("tcp", r.cfg.Addr)
@@ -147,7 +119,7 @@ func (r *Adapter) Start() error {
 }
 
 // Stop 停止适配器: 关闭监听与所有连接, 排空指令管道, 阻塞至完全退出.
-// 退出后 Inbound 会被关闭, 消费方可通过 range 退出; 之后的投递会返回 ErrNotRunning.
+// 退出后 Inbound 会被关闭, 消费方可通过 range 退出; 之后的投递会返回 uerr.ErrNotRunning.
 func (r *Adapter) Stop() error {
 	r.mu.Lock()
 	if !r.running {
@@ -169,7 +141,7 @@ func (r *Adapter) Stop() error {
 	}
 
 	// 3. 等待中的 API 调用全部回执失败
-	r.failPending(ErrNotRunning)
+	r.failPending(uerr.ErrNotRunning)
 
 	// 4. 等待内部 goroutine 退出
 	r.wg.Wait()
@@ -186,11 +158,6 @@ func (r *Adapter) Stop() error {
 }
 
 // Done 返回停止信号通道: Stop 时被关闭. 与管道配合使用:
-//
-//	select {
-//	case msg := <-a.Inbound():
-//	case <-a.Done():
-//	}
 func (r *Adapter) Done() <-chan struct{} { return r.done }
 
 // Inbound 接收消息管道 (OneBot 事件 -> 业务层), Start 后可用, Stop 时关闭
@@ -211,11 +178,11 @@ func (r *Adapter) SendAction(act *Action) error {
 	running, outbound := r.running, r.outbound
 	r.mu.RUnlock()
 	if !running || outbound == nil {
-		return ErrNotRunning
+		return uerr.ErrNotRunning
 	}
 	select {
 	case <-r.done:
-		return ErrNotRunning
+		return uerr.ErrNotRunning
 	case outbound <- act:
 		return nil
 	}
@@ -227,7 +194,7 @@ func (r *Adapter) Call(ctx context.Context, target, action string, params map[st
 	running := r.running
 	r.mu.RUnlock()
 	if !running {
-		return nil, ErrNotRunning
+		return nil, uerr.ErrNotRunning
 	}
 
 	echo := uuid.NewString()
@@ -249,7 +216,7 @@ func (r *Adapter) Call(ctx context.Context, target, action string, params map[st
 		return nil, ctx.Err()
 	case <-r.done:
 		r.removePending(echo)
-		return nil, ErrNotRunning
+		return nil, uerr.ErrNotRunning
 	}
 }
 
@@ -323,7 +290,7 @@ func (r *Adapter) drainOutbound() {
 	for {
 		select {
 		case act := <-r.outbound:
-			r.reply(act, nil, ErrNotRunning)
+			r.reply(act, nil, uerr.ErrNotRunning)
 		default:
 			return
 		}
@@ -358,17 +325,17 @@ func (r *Adapter) route(target string) (*gws.Conn, error) {
 		if p, ok := r.peers[target]; ok {
 			return p.conn, nil
 		}
-		return nil, ErrUnknownPeer
+		return nil, uerr.ErrUnknownPeer
 	}
 	switch len(r.peers) {
 	case 0:
-		return nil, ErrNoPeer
+		return nil, uerr.ErrNoPeer
 	case 1:
 		for _, p := range r.peers {
 			return p.conn, nil
 		}
 	}
-	return nil, ErrAmbiguousPeer
+	return nil, uerr.ErrAmbiguousPeer
 }
 
 func (r *Adapter) registerPending(echo string) chan *ApiResult {

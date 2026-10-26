@@ -1,10 +1,19 @@
 package onebot
 
+import "encoding/json"
+
 // BaseEvent 基础事件
 type BaseEvent struct {
 	Time     int64  `json:"time"`
 	SelfID   int64  `json:"self_id"`
 	PostType string `json:"post_type"`
+}
+
+// UnionEvent 统一事件结构, 便于路由
+type UnionEvent struct {
+	EventType string `json:"event_type"`
+	EventData any    `json:"event_data"`
+	Target    string `json:"-"` // 目标机器人 self_id, 为空时自动路由
 }
 
 // Sender 消息发送者
@@ -64,4 +73,23 @@ type PokeEvent struct {
 	GroupID    int64  `json:"group_id"`    // 群号
 	UserID     int64  `json:"user_id"`     // 发送者 QQ 号
 	TargetID   int64  `json:"target_id"`   // 被戳者 QQ 号
+}
+
+// Action 发送给 OneBot 实现端的 API 动作
+type Action struct {
+	Action string         `json:"action"`
+	Params map[string]any `json:"params,omitempty"`
+	Echo   string         `json:"echo,omitempty"`
+
+	Target string `json:"-"` // 目标机器人 self_id, 为空时自动路由
+}
+
+// ApiResult OneBot API 调用回执
+type ApiResult struct {
+	Status  string          `json:"status"`  // ok / async / failed
+	RetCode int             `json:"retcode"` // 0 表示成功
+	Data    json.RawMessage `json:"data"`    // 回执数据
+	Message string          `json:"message"`
+	Wording string          `json:"wording"`
+	Echo    string          `json:"echo"`
 }
