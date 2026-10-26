@@ -2,6 +2,12 @@ package onebot
 
 import "encoding/json"
 
+const (
+	MessageEventType = "event.message"
+	NotifyEventType  = "event.notify"
+	MetaEventType    = "event.meta"
+)
+
 // BaseEvent 基础事件
 type BaseEvent struct {
 	Time     int64  `json:"time"`
@@ -12,8 +18,8 @@ type BaseEvent struct {
 // UnionEvent 统一事件结构, 便于路由
 type UnionEvent struct {
 	EventType string `json:"event_type"`
-	EventData any    `json:"event_data"`
-	Target    string `json:"-"` // 目标机器人 self_id, 为空时自动路由
+	EventData []byte `json:"event_data"`
+	SelfID    int64  `json:"-"` // 目标机器人 self_id, 为空时自动路由
 }
 
 // Sender 消息发送者
@@ -92,4 +98,11 @@ type ApiResult struct {
 	Message string          `json:"message"`
 	Wording string          `json:"wording"`
 	Echo    string          `json:"echo"`
+}
+
+// CurrentStatus 当前状态
+type CurrentState struct {
+	IsRunning bool
+	PeerList  map[string]*peer
+	PeerCount int
 }
