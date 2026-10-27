@@ -2,6 +2,17 @@ package adapter
 
 import "fmt"
 
+func (r *Runtime) route(target string) (DriverType, error) {
+	_, ok := r.OnebotDriver.driver.GetCurrentState().PeerList[target]
+	if ok {
+		return OnebotDriver, nil
+	}
+
+	// TODO: 飞书
+
+	return "", fmt.Errorf("route -> peer not found or disconnected")
+}
+
 func (r *Runtime) enableOnebotDriverV11() (bool, error) {
 	// 获取数据库内当前配置
 	cfg, err := r.ConfigManager.GetConfig()
