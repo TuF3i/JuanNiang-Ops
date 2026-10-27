@@ -11,7 +11,7 @@ type Server struct {
 }
 
 // NewWsServer 创建 gws 事件处理器
-func NewWsServer(root *Adapter) *Server {
+func NewWsServer(root *Driver) *Server {
 	return &Server{root: root}
 }
 

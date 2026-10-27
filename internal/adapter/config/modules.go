@@ -1,4 +1,4 @@
-package adapter
+package config
 
 import (
 	"time"
@@ -6,7 +6,14 @@ import (
 	"gorm.io/gorm"
 )
 
-// Onebot11 适配器配置
+const (
+	defaultAddr          = "0.0.0.0:8090"
+	defaultToken         = "JUAN_ONEBOT_TOKEN_1024"
+	defaultEnable        = false
+	defaultMessageBuffer = 256
+	defaultActionBuffer  = 64
+)
+
 type OneBotConfig struct {
 	ID        int64          `gorm:"primaryKey;type:bigint;autoIncrement;comment:表自增主键ID"`
 	CreatedAt time.Time      `gorm:"column:created_at;type:timestamp;not null;default:CURRENT_TIMESTAMP;comment:创建时间"`
@@ -20,29 +27,4 @@ type OneBotConfig struct {
 
 	MessageBuffer int `gorm:"column:message_buffer;not null;default:256;comment:接收消息管道缓冲大小"`
 	ActionBuffer  int `gorm:"column:action_buffer;not null;default:64;comment:发送指令管道缓冲大小"`
-}
-
-// Onebot11 表名
-func (OneBotConfig) TableName() string { return "onebot_configs" }
-
-// ---------- gorm 钩子: 配置变更 -> 通知 runtime 重建适配器 ----------
-// 只挂 Create/Update/Delete 三个钩子 (Save 内部为 Create 或 Update, 不会双触发).
-// ⚠️ 批量更新不带主键不触发 AfterUpdate, 更新配置必须带主键, 详见 hooks.go 包注释.
-
-// AfterCreate 创建配置后通知
-func (OneBotConfig) AfterCreate(*gorm.DB) error {
-	notifyConfigChanged()
-	return nil
-}
-
-// AfterUpdate 更新配置后通知
-func (OneBotConfig) AfterUpdate(*gorm.DB) error {
-	notifyConfigChanged()
-	return nil
-}
-
-// AfterDelete 删除配置后通知
-func (OneBotConfig) AfterDelete(*gorm.DB) error {
-	notifyConfigChanged()
-	return nil
 }

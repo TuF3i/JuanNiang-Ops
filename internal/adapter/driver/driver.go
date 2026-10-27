@@ -2,7 +2,7 @@ package driver
 
 import (
 	"JuanNiang-Ops/internal/adapter/common"
-	"JuanNiang-Ops/internal/adapter_old/onebot"
+	"JuanNiang-Ops/internal/adapter/driver/onebot"
 )
 
 // Driver 平台适配器统一视角 (生命周期 + 事件管道), 具体平台实现隐式匹配.

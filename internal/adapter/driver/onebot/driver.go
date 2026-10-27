@@ -2,7 +2,6 @@ package onebot
 
 import (
 	"JuanNiang-Ops/internal/adapter/common"
-	"JuanNiang-Ops/pkg/uerr"
 	"bufio"
 	"context"
 	"encoding/json"
@@ -62,13 +61,13 @@ func NewDriver(cfg Config) *Driver {
 // Start 启动适配器: 监听端口, 建立收发管道. 重复调用返回 ErrRunning.
 func (r *Driver) Start() error {
 	if !r.cfg.Enable {
-		return uerr.ErrDisabled
+		return fmt.Errorf("onebot -> driver is disabled")
 	}
 
 	r.mu.Lock()
 	if r.running {
 		r.mu.Unlock()
-		return uerr.ErrRunning
+		return fmt.Errorf("onebot -> driver is running")
 	}
 
 	listener, err := net.Listen("tcp", r.cfg.Addr)
@@ -120,7 +119,7 @@ func (r *Driver) Stop() error {
 	}
 
 	// 3. 等待中的 API 调用全部回执失败
-	r.failPending(uerr.ErrNotRunning)
+	r.failPending(fmt.Errorf("onebot -> driver is not running"))
 
 	// 4. 等待内部 goroutine 退出
 	r.wg.Wait()
@@ -189,11 +188,11 @@ func (r *Driver) SendAction(act *Action) error {
 	running, outbound := r.running, r.outbound
 	r.mu.RUnlock()
 	if !running || outbound == nil {
-		return uerr.ErrNotRunning
+		return fmt.Errorf("onebot -> driver is not running")
 	}
 	select {
 	case <-r.done:
-		return uerr.ErrNotRunning
+		return fmt.Errorf("onebot -> driver is not running")
 	case outbound <- act:
 		return nil
 	}
@@ -205,7 +204,7 @@ func (r *Driver) Call(ctx context.Context, target, action string, params map[str
 	running := r.running
 	r.mu.RUnlock()
 	if !running {
-		return nil, uerr.ErrNotRunning
+		return nil, fmt.Errorf("onebot -> driver is not running")
 	}
 
 	echo := uuid.NewString()
@@ -222,7 +221,7 @@ func (r *Driver) Call(ctx context.Context, target, action string, params map[str
 		}
 		if cr.result.RetCode != 0 {
 			return cr.result, fmt.Errorf("onebot: api %q failed: retcode=%d status=%s message=%s: %w",
-				action, cr.result.RetCode, cr.result.Status, cr.result.Message, uerr.ErrApiFailed)
+				action, cr.result.RetCode, cr.result.Status, cr.result.Message, fmt.Errorf("onebot -> call api failed"))
 		}
 		return cr.result, nil
 	case <-ctx.Done():
@@ -230,7 +229,7 @@ func (r *Driver) Call(ctx context.Context, target, action string, params map[str
 		return nil, ctx.Err()
 	case <-r.done:
 		r.removePending(echo)
-		return nil, uerr.ErrNotRunning
+		return nil, fmt.Errorf("onebot -> driver is not running")
 	}
 }
 
@@ -377,7 +376,7 @@ func (r *Driver) drainOutbound() {
 	for {
 		select {
 		case act := <-r.outbound:
-			r.reply(act, nil, uerr.ErrNotRunning)
+			r.reply(act, nil, fmt.Errorf("onebot -> driver is not running"))
 		default:
 			return
 		}
@@ -412,17 +411,17 @@ func (r *Driver) route(target string) (*gws.Conn, error) {
 		if p, ok := r.peers[target]; ok {
 			return p.conn, nil
 		}
-		return nil, uerr.ErrUnknownPeer
+		return nil, fmt.Errorf("onebot -> unknown peer")
 	}
 	switch len(r.peers) {
 	case 0:
-		return nil, uerr.ErrNoPeer
+		return nil, fmt.Errorf("onebot -> no peer exist")
 	case 1:
 		for _, p := range r.peers {
 			return p.conn, nil
 		}
 	}
-	return nil, uerr.ErrAmbiguousPeer
+	return nil, fmt.Errorf("onebot -> ambiguous peer")
 }
 
 func (r *Driver) registerPending(echo string) chan *callResult {
