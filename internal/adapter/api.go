@@ -13,22 +13,10 @@ func (r *Runtime) EnableDriver(driverType DriverType) error { // status, error
 		case <-r.OnebotDriver.ctx.Done():
 			return fmt.Errorf("enable driver -> driver is shutting down")
 		default:
-			cfg, err := r.ConfigManager.GetConfig()
+			err := r.enableOnebotDriverV11()
 			if err != nil {
 				return fmt.Errorf("enable driver -> %v", err.Error())
 			}
-
-			cfg.Enable = true
-
-			err = r.ConfigManager.UpdateConfig(cfg)
-			if err != nil {
-				return fmt.Errorf("enable driver -> %v", err.Error())
-			}
-
-			r.OnebotDriver.cfg = *cfg
-
-			// TODO: 通知重建
-
 			return nil
 		}
 		// TODO: 飞书
@@ -38,7 +26,50 @@ func (r *Runtime) EnableDriver(driverType DriverType) error { // status, error
 }
 
 func (r *Runtime) DisabledDriver(driverType DriverType) error {
-	return nil
+	switch driverType {
+	case OnebotDriver:
+		select {
+		case <-r.OnebotDriver.ctx.Done():
+			return fmt.Errorf("enable driver -> driver is shutting down")
+		default:
+			err := r.enableOnebotDriverV11()
+			if err != nil {
+				return fmt.Errorf("disable driver -> %v", err.Error())
+			}
+			return nil
+		}
+		// TODO: 飞书
+	default:
+		return fmt.Errorf("enable driver -> unknow driver type")
+	}
+}
+
+func (r *Runtime) UpdateRuntimeConfig(cfg any) error {
+	switch dst := (cfg).(type) {
+	case *config.OneBotConfig:
+		src, err := r.ConfigManager.GetConfig()
+		if err != nil {
+			return fmt.Errorf("update runtime config -> %v", err.Error())
+		}
+
+		ok, err := r.equal(src, dst)
+		if err != nil {
+			return fmt.Errorf("update runtime config -> %v", err.Error())
+		}
+
+		if ok {
+			return nil
+		}
+
+		err = r.ConfigManager.UpdateConfig(dst)
+		if err != nil {
+			return fmt.Errorf("update runtime config -> %v", err.Error())
+		}
+		return nil
+		// TODO: 飞书
+	default:
+		return nil
+	}
 }
 
 func (r *Runtime) GetAdapterStatus(driverType DriverType) (*common.RuntimeState, error) {

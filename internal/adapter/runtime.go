@@ -9,6 +9,10 @@ import (
 
 type DriverType string
 
+type configKind interface {
+	config.OneBotConfig
+}
+
 const (
 	OnebotDriver = "driver.onebot"
 	FeishuDriver = "driver.feishu"
@@ -29,3 +33,7 @@ type Runtime struct {
 
 	mu sync.Mutex
 }
+
+func CreateRuntime() (*Runtime, error) {}
+
+func ReleaseRuntime() error {}
