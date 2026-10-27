@@ -48,13 +48,6 @@ type BaseEvent struct {
 	PostType string `json:"post_type"`
 }
 
-// UnionEvent 统一事件结构, 便于路由
-type UnionEvent struct {
-	EventType string `json:"event_type"`
-	EventData []byte `json:"event_data"`
-	SelfID    int64  `json:"-"` // 目标机器人 self_id, 为空时自动路由
-}
-
 // Sender 消息发送者
 type Sender struct {
 	UserID   int64  `json:"user_id"`

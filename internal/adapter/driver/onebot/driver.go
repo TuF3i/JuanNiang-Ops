@@ -2,6 +2,7 @@ package onebot
 
 import (
 	"JuanNiang-Ops/internal/adapter/common"
+	"JuanNiang-Ops/internal/adapter/config"
 	"bufio"
 	"context"
 	"encoding/json"
@@ -23,7 +24,7 @@ type Driver struct {
 	cfg Config
 
 	inbound  chan common.Message
-	notices  chan UnionEvent
+	notices  chan common.UnionEvent
 	outbound chan *Action
 
 	mu    sync.RWMutex
@@ -43,15 +44,26 @@ type Driver struct {
 }
 
 // NewDriver 创建适配器, 调用 Start 后管道才会建立
-func NewDriver(cfg Config) *Driver {
+func NewDriver(cfg config.OneBotConfig) *Driver {
 	if cfg.MessageBuffer <= 0 {
 		cfg.MessageBuffer = 256
 	}
 	if cfg.ActionBuffer <= 0 {
 		cfg.ActionBuffer = 64
 	}
+
+	c := Config{
+		Addr:   cfg.Addr,
+		Token:  cfg.Token,
+		Admin:  cfg.Admin,
+		Enable: cfg.Enable,
+
+		MessageBuffer: cfg.MessageBuffer,
+		ActionBuffer:  cfg.ActionBuffer,
+	}
+
 	return &Driver{
-		cfg:     cfg,
+		cfg:     c,
 		peers:   make(map[string]*peer),
 		conns:   make(map[*gws.Conn]*peer),
 		pending: make(map[string]chan *callResult),
@@ -77,7 +89,7 @@ func (r *Driver) Start() error {
 	}
 
 	r.inbound = make(chan common.Message, r.cfg.MessageBuffer)
-	r.notices = make(chan UnionEvent, defaultNoticeBuffer)
+	r.notices = make(chan common.UnionEvent, defaultNoticeBuffer)
 	r.outbound = make(chan *Action, r.cfg.ActionBuffer)
 	r.done = make(chan struct{})
 	r.listener = listener
@@ -144,7 +156,7 @@ func (r *Driver) Inbound() <-chan common.Message { return r.inbound }
 
 // Notices 通知管道 (OneBot notice/lifecycle 事件, 原始 JSON -> 业务层), Start 后可用, Stop 时关闭.
 // 业务层可使用 PokeEvent / LifeCycleEvent 等结构自行解析 EventData.
-func (r *Driver) Notices() <-chan UnionEvent { return r.notices }
+func (r *Driver) Notices() <-chan common.UnionEvent { return r.notices }
 
 // Outbound 发送指令管道 (业务层 -> OneBot), 只写方向. Start 后可用.
 // 适配器停止后其剩余内容会被排空丢弃; 建议优先使用 Send/Call.
@@ -156,13 +168,13 @@ func (r *Driver) Send(action string, params map[string]any, target string) error
 }
 
 // GetCurrentState 获取适配器当前状态 (含各客户端状态快照)
-func (r *Driver) GetCurrentState() CurrentState {
+func (r *Driver) GetCurrentState() *common.RuntimeState {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	peers := make(map[string]PeerState, len(r.peers))
+	peers := make(map[string]common.PeerState, len(r.peers))
 	for selfID, p := range r.peers {
-		peers[selfID] = PeerState{
+		peers[selfID] = common.PeerState{
 			Session:    p.session,
 			SelfID:     p.selfID,
 			RemoteAddr: p.conn.RemoteAddr().String(),
@@ -170,7 +182,7 @@ func (r *Driver) GetCurrentState() CurrentState {
 		}
 	}
 
-	return CurrentState{
+	return &common.RuntimeState{
 		IsRunning: r.running,
 		PeerList:  peers,
 		PeerCount: len(peers),
@@ -686,7 +698,7 @@ func (r *Driver) onMetaEvent(conn *gws.Conn, data []byte) {
 			r.touchPeer(fmt.Sprint(beat.SelfID))
 		}
 	case "lifecycle":
-		r.pushNotice(UnionEvent{
+		r.pushNotice(common.UnionEvent{
 			EventType: MetaEventType,
 			EventData: data,
 			SelfID:    r.connSelfIDInt(conn),
@@ -698,7 +710,7 @@ func (r *Driver) onMetaEvent(conn *gws.Conn, data []byte) {
 
 // onNoticeEvent 处理通知类事件 (戳一戳等), 投递通知管道 (原始 JSON, 业务层自行解析)
 func (r *Driver) onNoticeEvent(data []byte, selfID int64) {
-	r.pushNotice(UnionEvent{
+	r.pushNotice(common.UnionEvent{
 		EventType: NotifyEventType,
 		EventData: data,
 		SelfID:    selfID,
@@ -723,7 +735,7 @@ func (r *Driver) push(msg common.Message) {
 }
 
 // pushNotice 投递事件到通知管道; 管道满时阻塞 (背压), 适配器停止后丢弃
-func (r *Driver) pushNotice(ev UnionEvent) {
+func (r *Driver) pushNotice(ev common.UnionEvent) {
 	select {
 	case <-r.done:
 	case r.notices <- ev:

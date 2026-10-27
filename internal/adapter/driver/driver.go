@@ -2,7 +2,6 @@ package driver
 
 import (
 	"JuanNiang-Ops/internal/adapter/common"
-	"JuanNiang-Ops/internal/adapter/driver/onebot"
 )
 
 // Driver 平台适配器统一视角 (生命周期 + 事件管道), 具体平台实现隐式匹配.
@@ -14,8 +13,8 @@ type Driver interface {
 
 	// 事件管道
 	Inbound() <-chan common.Message
-	Notices() <-chan onebot.UnionEvent
+	Notices() <-chan common.UnionEvent
 
 	// 状态快照
-	GetCurrentState() onebot.CurrentState
+	GetCurrentState() common.RuntimeState
 }

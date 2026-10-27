@@ -7,17 +7,25 @@ import (
 	"sync"
 )
 
+type DriverType string
+
+const (
+	OnebotDriver = "driver.onebot"
+	FeishuDriver = "driver.feishu"
+)
+
 type OnebotDriverV11 struct {
 	driver *onebot.Driver
-	cfg    *onebot.Config
+	cfg    config.OneBotConfig
+
+	restSignal chan<- struct{}
+	ctx        context.Context
+	cancel     context.CancelFunc
 }
 
 type Runtime struct {
 	ConfigManager *config.ConfigManager
 	OnebotDriver  *OnebotDriverV11
 
-	mu         sync.Mutex
-	restSignal chan<- struct{}
-	ctx        context.Context
-	cancel     context.CancelFunc
+	mu sync.Mutex
 }
