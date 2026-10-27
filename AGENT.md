@@ -80,6 +80,10 @@ OneBot 适配器要点：
 - 消息事件未携带 `self_id` 时用连接已绑定的身份兜底（`connSelfID`）。
 - 首个事件携带的 `self_id` 用于绑定连接；同 `self_id` 重复接入会顶掉旧连接。
 - 多机器人：`Action.Target` 指定 `self_id` 精确路由；单端自动路由；多端未指定返回 `ErrAmbiguousPeer`。
+- 消息转换是双向的：接收侧 `convertSegments`（OneBot 段 → `common.MessagePart`），
+  发送侧 `PartsToSegments`（统一部件 → OneBot 段，未知部件/非法 ID 返回错误而非静默丢弃）。
+- 发消息 API 接受统一消息部件：`SendGroupMsg/SendPrivateMsg`（fire-and-forget）与
+  `CallGroupMsg/CallPrivateMsg`（等待回执），业务层无需接触 OneBot 原生段结构。
 - `Call(ctx, target, action, params)`：echo 关联的请求-响应模式；本地失败（路由/序列化/写连接）
   经 pending 通道直接返回原始错误（`errors.Is` 可判 `ErrNoPeer/ErrUnknownPeer/ErrAmbiguousPeer/ErrNotRunning`）；
   远端 retcode≠0 返回错误并包装 `uerr.ErrApiFailed`。

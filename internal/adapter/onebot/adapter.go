@@ -268,8 +268,12 @@ func (r *Adapter) Call(ctx context.Context, target, action string, params map[st
 	}
 }
 
-// SendGroupMsg 发送群消息
-func (r *Adapter) SendGroupMsg(target string, groupID int64, segments []Segment) error {
+// SendGroupMsg 发送群消息: 统一消息部件 -> OneBot 消息段 -> send_group_msg
+func (r *Adapter) SendGroupMsg(target string, groupID int64, parts []common.MessagePart) error {
+	segments, err := PartsToSegments(parts)
+	if err != nil {
+		return err
+	}
 	return r.Send(
 		"send_group_msg",
 		map[string]any{
@@ -280,8 +284,12 @@ func (r *Adapter) SendGroupMsg(target string, groupID int64, segments []Segment)
 	)
 }
 
-// SendPrivateMsg 发送私聊消息
-func (r *Adapter) SendPrivateMsg(target string, userID int64, segments []Segment) error {
+// SendPrivateMsg 发送私聊消息: 统一消息部件 -> OneBot 消息段 -> send_private_msg
+func (r *Adapter) SendPrivateMsg(target string, userID int64, parts []common.MessagePart) error {
+	segments, err := PartsToSegments(parts)
+	if err != nil {
+		return err
+	}
 	return r.Send(
 		"send_private_msg",
 		map[string]any{
@@ -290,6 +298,30 @@ func (r *Adapter) SendPrivateMsg(target string, userID int64, segments []Segment
 		},
 		target,
 	)
+}
+
+// CallGroupMsg 发送群消息并等待回执 (统一消息部件版本)
+func (r *Adapter) CallGroupMsg(ctx context.Context, target string, groupID int64, parts []common.MessagePart) (*ApiResult, error) {
+	segments, err := PartsToSegments(parts)
+	if err != nil {
+		return nil, err
+	}
+	return r.Call(ctx, target, "send_group_msg", map[string]any{
+		"group_id": groupID,
+		"message":  segments,
+	})
+}
+
+// CallPrivateMsg 发送私聊消息并等待回执 (统一消息部件版本)
+func (r *Adapter) CallPrivateMsg(ctx context.Context, target string, userID int64, parts []common.MessagePart) (*ApiResult, error) {
+	segments, err := PartsToSegments(parts)
+	if err != nil {
+		return nil, err
+	}
+	return r.Call(ctx, target, "send_private_msg", map[string]any{
+		"user_id": userID,
+		"message": segments,
+	})
 }
 
 // runWebSocket accept 循环. 不使用 gws.RunListener —— 它在 listener 关闭后

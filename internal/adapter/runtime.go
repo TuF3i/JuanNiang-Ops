@@ -9,7 +9,7 @@
 // AdapterRuntime 是适配器的生命周期管理器:
 //   - 从数据库 (onebot_configs) 读取配置, 构建并启动适配器
 //   - 通过 gorm 钩子 (见 hooks.go) 感知配置变更, 自动重建适配器 (Stop 旧实例 + New + Start)
-//   - 管理事件泵 (见 handler.go), 将适配器事件分发给业务层注册的 handler
+//   - 管理事件泵 (见 event.go), 将适配器事件分发给业务层注册的 handler
 package adapter
 
 import (
@@ -27,7 +27,7 @@ import (
 
 // 默认配置值
 const (
-	defaultAddr          = ":8080"
+	defaultAddr          = "0.0.0.0:8081"
 	defaultMessageBuffer = 256
 	defaultActionBuffer  = 64
 )
@@ -38,18 +38,18 @@ const reconcileInterval = 30 * time.Second
 // AdapterRuntime 适配器生命周期管理器.
 // 单条配置 (onebot_configs 首行) -> 单个 OneBot 适配器实例, 配置变更时自动重建.
 type AdapterRuntime struct {
-	mu      sync.Mutex      // 保护 adapter/cfg, 且串行化 reconcile
+	mu      sync.Mutex // 保护 adapter/cfg, 且串行化 reconcile
 	db      *gorm.DB
 	adapter *onebot.Adapter // 当前适配器实例, 未启动时为 nil
 	cfg     OneBotConfig    // 当前生效配置快照
 
-	handlers handlerSet // 事件 handler (见 handler.go)
+	handlers handlerSet // 事件 handler (见 event.go)
 
-	notify chan struct{} // gorm 钩子 -> reconcile 触发 (缓冲 1, 合并抖动)
-	done   chan struct{} // runtime 关闭信号, close 时通知所有内部 goroutine
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	notify  chan struct{} // gorm 钩子 -> reconcile 触发 (缓冲 1, 合并抖动)
+	done    chan struct{} // runtime 关闭信号, close 时通知所有内部 goroutine
+	ctx     context.Context
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
 	started bool
 }
 
@@ -204,9 +204,9 @@ func (rt *AdapterRuntime) GetStatus() RuntimeStatus {
 
 // RuntimeStatus 管理器状态快照
 type RuntimeStatus struct {
-	AdapterRunning bool                  // 适配器是否运行中
-	Config         OneBotConfig          // 当前生效配置
-	PeerCount      int                   // 已接入机器人端数量
+	AdapterRunning bool                        // 适配器是否运行中
+	Config         OneBotConfig                // 当前生效配置
+	PeerCount      int                         // 已接入机器人端数量
 	PeerList       map[string]onebot.PeerState // 客户端状态快照
 }
 

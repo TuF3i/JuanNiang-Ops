@@ -445,7 +445,7 @@ func TestTargetRouting(t *testing.T) {
 	c1.send(t, map[string]any{"time": 1, "self_id": 1, "post_type": "meta_event", "meta_event_type": "heartbeat"})
 	waitPeer(t, a, "1")
 
-	if err := a.SendGroupMsg("", 888, []Segment{Text("x")}); err != nil {
+	if err := a.SendGroupMsg("", 888, []common.MessagePart{common.TextPart{Text: "x"}}); err != nil {
 		t.Fatalf("auto route: %v", err)
 	}
 	if data := c1.recvRaw(t); !strings.Contains(string(data), `"group_id":888`) {
@@ -466,7 +466,7 @@ func TestTargetRouting(t *testing.T) {
 	}
 
 	// 指定 Target 精确路由
-	if err := a.SendPrivateMsg("2", 20001, []Segment{Text("direct")}); err != nil {
+	if err := a.SendPrivateMsg("2", 20001, []common.MessagePart{common.TextPart{Text: "direct"}}); err != nil {
 		t.Fatalf("target route: %v", err)
 	}
 	if data := c2.recvRaw(t); !strings.Contains(string(data), `"user_id":20001`) {
@@ -477,6 +477,66 @@ func TestTargetRouting(t *testing.T) {
 	_, err = a.Call(ctx, "999", "send_group_msg", nil)
 	if !errors.Is(err, uerr.ErrUnknownPeer) {
 		t.Fatalf("unknown peer: want ErrUnknownPeer, got %v", err)
+	}
+}
+
+// ---------- 统一消息部件发送 ----------
+
+func TestSendWithCommonParts(t *testing.T) {
+	a := newTestAdapter(t, nil)
+	defer a.Stop()
+
+	c := newTestClient(t, a.GetCurrentConfig().Addr, nil)
+	c.send(t, map[string]any{"time": 1, "self_id": 10000, "post_type": "meta_event", "meta_event_type": "heartbeat"})
+	waitPeer(t, a, "10000")
+
+	// 统一部件 -> 私聊发送 -> 客户端收到合法 OneBot JSON
+	err := a.SendPrivateMsg("10000", 20001, []common.MessagePart{
+		common.ReplyPart{MessageID: "42"},
+		common.TextPart{Text: "hello"},
+		common.MentionPart{UserID: "20001"},
+		common.MentionAllPart{},
+		common.ImagePart{FileID: "abc.jpg"},
+	})
+	if err != nil {
+		t.Fatalf("send private: %v", err)
+	}
+
+	var act struct {
+		Action string `json:"action"`
+		Params struct {
+			UserID  int64     `json:"user_id"`
+			Message []Segment `json:"message"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(c.recvRaw(t), &act); err != nil {
+		t.Fatalf("unmarshal action: %v", err)
+	}
+	if act.Action != "send_private_msg" || act.Params.UserID != 20001 {
+		t.Fatalf("action = %s params.user_id = %d", act.Action, act.Params.UserID)
+	}
+	if len(act.Params.Message) != 5 {
+		t.Fatalf("segments = %d, want 5", len(act.Params.Message))
+	}
+	if act.Params.Message[0].Type != "reply" || act.Params.Message[1].Type != "text" ||
+		act.Params.Message[2].Type != "at" || act.Params.Message[3].Type != "at" ||
+		act.Params.Message[4].Type != "image" {
+		t.Errorf("segment types = %v", act.Params.Message)
+	}
+
+	// 非法部件 (非数字 Mention) 应报错且不发送
+	err = a.SendGroupMsg("10000", 888, []common.MessagePart{common.MentionPart{UserID: "not-a-qq"}})
+	if err == nil || !strings.Contains(err.Error(), "invalid user_id") {
+		t.Fatalf("invalid part: want error, got %v", err)
+	}
+
+	// Call 版本: 统一部件 + 回执往返
+	go func() { _ = recvApiCall(t, c, 0) }()
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	result, err := a.CallGroupMsg(ctx, "10000", 888, []common.MessagePart{common.TextPart{Text: "via call"}})
+	if err != nil || result.RetCode != 0 {
+		t.Fatalf("call group: result=%+v err=%v", result, err)
 	}
 }
 

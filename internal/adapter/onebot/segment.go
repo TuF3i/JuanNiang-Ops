@@ -3,6 +3,7 @@ package onebot
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 
 	"JuanNiang-Ops/internal/adapter/common"
 )
@@ -133,4 +134,64 @@ func unmarshalSegment(data any, target any) error {
 		return err
 	}
 	return json.Unmarshal(raw, target)
+}
+
+// ---------- 发送侧: 统一消息部件 -> OneBot 消息段 ----------
+
+// PartsToSegments 将统一消息部件转换为 OneBot 消息段 (业务层只需构造 common 部件).
+// 支持的部件: TextPart / MentionPart / MentionAllPart / ImagePart / FilePart / ReplyPart;
+// 未知部件返回错误 (不静默丢弃, 避免消息内容意外缺失).
+func PartsToSegments(parts []common.MessagePart) ([]Segment, error) {
+	if len(parts) == 0 {
+		return nil, nil
+	}
+	segments := make([]Segment, 0, len(parts))
+	for i, part := range parts {
+		switch p := part.(type) {
+		case common.TextPart:
+			segments = append(segments, Text(p.Text))
+		case common.MentionPart:
+			uid, err := strconv.ParseInt(p.UserID, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("onebot: part[%d] mention: invalid user_id %q: %w", i, p.UserID, err)
+			}
+			segments = append(segments, At(uid))
+		case common.MentionAllPart:
+			segments = append(segments, AtAll())
+		case common.ImagePart:
+			// 优先平台文件标识 (file:// 或 http:// 等实现端可识别的形式), 其次远程 URL
+			file := p.FileID
+			if file == "" {
+				file = p.URL
+			}
+			if file == "" {
+				return nil, fmt.Errorf("onebot: part[%d] image: file_id and url are both empty", i)
+			}
+			segments = append(segments, Image(file))
+		case common.FilePart:
+			data := map[string]any{
+				"file": firstNonEmpty(p.FileID, p.URL),
+				"name": p.Name,
+			}
+			if p.URL != "" {
+				data["url"] = p.URL
+			}
+			segments = append(segments, Segment{Type: "file", Data: data})
+		case common.ReplyPart:
+			segments = append(segments, Reply(p.MessageID))
+		default:
+			return nil, fmt.Errorf("onebot: part[%d] unsupported type %q", i, part.PartType())
+		}
+	}
+	return segments, nil
+}
+
+// firstNonEmpty 返回第一个非空字符串, 全空返回空串
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
