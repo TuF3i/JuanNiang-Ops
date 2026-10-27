@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/lxzan/gws"
 
+	"JuanNiang-Ops/internal/adapter/common"
 	"JuanNiang-Ops/pkg/uerr"
 )
 
@@ -38,14 +40,19 @@ type peer struct {
 	lastBeat time.Time
 }
 
+// defaultNoticeBuffer 通知管道默认缓冲大小
+const defaultNoticeBuffer = 64
+
 // Adapter OneBot 正向 WebSocket 适配器.
-// 内部维护两条管道:
-//   - inbound:  接收消息管道, OneBot 事件 -> 业务层
+// 内部维护两条接收管道与一条发送管道:
+//   - inbound:  接收消息管道, OneBot 消息事件 -> 统一消息 common.Message -> 业务层
+//   - notices:  通知管道, OneBot notice/lifecycle 事件 (原始 JSON) -> 业务层
 //   - outbound: 发送指令管道, 业务层 -> OneBot 实现端
 type Adapter struct {
 	cfg Config
 
-	inbound  chan UnionEvent
+	inbound  chan common.Message
+	notices  chan UnionEvent
 	outbound chan *Action
 
 	mu    sync.RWMutex
@@ -61,7 +68,13 @@ type Adapter struct {
 	wg      sync.WaitGroup
 
 	callMu  sync.Mutex
-	pending map[string]chan *ApiResult
+	pending map[string]chan *callResult
+}
+
+// callResult API 调用结果: 远端回执走 result, 本地失败 (路由/序列化/写连接) 走 err 以保留错误链
+type callResult struct {
+	result *ApiResult
+	err    error
 }
 
 // NewAdapter 创建适配器, 调用 Start 后管道才会建立
@@ -76,7 +89,7 @@ func NewAdapter(cfg Config) *Adapter {
 		cfg:     cfg,
 		peers:   make(map[string]*peer),
 		conns:   make(map[*gws.Conn]*peer),
-		pending: make(map[string]chan *ApiResult),
+		pending: make(map[string]chan *callResult),
 	}
 }
 
@@ -98,7 +111,8 @@ func (r *Adapter) Start() error {
 		return fmt.Errorf("onebot: listen %s: %w", r.cfg.Addr, err)
 	}
 
-	r.inbound = make(chan UnionEvent, r.cfg.MessageBuffer)
+	r.inbound = make(chan common.Message, r.cfg.MessageBuffer)
+	r.notices = make(chan UnionEvent, defaultNoticeBuffer)
 	r.outbound = make(chan *Action, r.cfg.ActionBuffer)
 	r.done = make(chan struct{})
 	r.listener = listener
@@ -145,8 +159,9 @@ func (r *Adapter) Stop() error {
 	// 4. 等待内部 goroutine 退出
 	r.wg.Wait()
 
-	// 5. 关闭接收管道, 通知下游; 清空连接表以便下次 Start
+	// 5. 关闭接收管道 (消息与通知), 通知下游; 清空连接表以便下次 Start
 	close(r.inbound)
+	close(r.notices)
 	r.mu.Lock()
 	r.peers = make(map[string]*peer)
 	r.conns = make(map[*gws.Conn]*peer)
@@ -159,8 +174,12 @@ func (r *Adapter) Stop() error {
 // Done 返回停止信号通道: Stop 时被关闭. 与管道配合使用:
 func (r *Adapter) Done() <-chan struct{} { return r.done }
 
-// Inbound 接收消息管道 (OneBot 事件 -> 业务层), Start 后可用, Stop 时关闭
-func (r *Adapter) Inbound() <-chan UnionEvent { return r.inbound }
+// Inbound 接收消息管道 (OneBot 消息事件 -> 统一消息 -> 业务层), Start 后可用, Stop 时关闭
+func (r *Adapter) Inbound() <-chan common.Message { return r.inbound }
+
+// Notices 通知管道 (OneBot notice/lifecycle 事件, 原始 JSON -> 业务层), Start 后可用, Stop 时关闭.
+// 业务层可使用 PokeEvent / LifeCycleEvent 等结构自行解析 EventData.
+func (r *Adapter) Notices() <-chan UnionEvent { return r.notices }
 
 // Outbound 发送指令管道 (业务层 -> OneBot), 只写方向. Start 后可用.
 // 适配器停止后其剩余内容会被排空丢弃; 建议优先使用 Send/Call.
@@ -171,15 +190,26 @@ func (r *Adapter) Send(action string, params map[string]any, target string) erro
 	return r.SendAction(&Action{Action: action, Params: params, Target: target})
 }
 
-// GetCurrentState 获取适配器当前状态
+// GetCurrentState 获取适配器当前状态 (含各客户端状态快照)
 func (r *Adapter) GetCurrentState() CurrentState {
-	cst := CurrentState{
-		IsRunning: r.running,
-		PeerList:  r.peers,
-		PeerCount: len(r.peers),
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	peers := make(map[string]PeerState, len(r.peers))
+	for selfID, p := range r.peers {
+		peers[selfID] = PeerState{
+			Session:    p.session,
+			SelfID:     p.selfID,
+			RemoteAddr: p.conn.RemoteAddr().String(),
+			LastBeat:   p.lastBeat,
+		}
 	}
 
-	return cst
+	return CurrentState{
+		IsRunning: r.running,
+		PeerList:  peers,
+		PeerCount: len(peers),
+	}
 }
 
 // GetCurrentConfig 获取当前配置
@@ -220,12 +250,15 @@ func (r *Adapter) Call(ctx context.Context, target, action string, params map[st
 	}
 
 	select {
-	case result := <-ch:
-		if result.RetCode != 0 {
-			return result, fmt.Errorf("onebot: api %q failed: retcode=%d status=%s message=%s",
-				action, result.RetCode, result.Status, result.Message)
+	case cr := <-ch:
+		if cr.err != nil {
+			return nil, cr.err
 		}
-		return result, nil
+		if cr.result.RetCode != 0 {
+			return cr.result, fmt.Errorf("onebot: api %q failed: retcode=%d status=%s message=%s: %w",
+				action, cr.result.RetCode, cr.result.Status, cr.result.Message, uerr.ErrApiFailed)
+		}
+		return cr.result, nil
 	case <-ctx.Done():
 		r.removePending(echo)
 		return nil, ctx.Err()
@@ -361,8 +394,8 @@ func (r *Adapter) route(target string) (*gws.Conn, error) {
 	return nil, uerr.ErrAmbiguousPeer
 }
 
-func (r *Adapter) registerPending(echo string) chan *ApiResult {
-	ch := make(chan *ApiResult, 1)
+func (r *Adapter) registerPending(echo string) chan *callResult {
+	ch := make(chan *callResult, 1)
 	r.callMu.Lock()
 	r.pending[echo] = ch
 	r.callMu.Unlock()
@@ -377,12 +410,29 @@ func (r *Adapter) removePending(echo string) {
 
 // resolve 根据 echo 分发 API 回执
 func (r *Adapter) resolve(echo string, result *ApiResult) {
+	if echo == "" || result == nil {
+		return
+	}
 	r.callMu.Lock()
 	ch, ok := r.pending[echo]
 	delete(r.pending, echo)
 	r.callMu.Unlock()
 	if ok {
-		ch <- result
+		ch <- &callResult{result: result}
+	}
+}
+
+// resolveErr 根据 echo 分发本地失败 (保留原始错误链)
+func (r *Adapter) resolveErr(echo string, err error) {
+	if echo == "" || err == nil {
+		return
+	}
+	r.callMu.Lock()
+	ch, ok := r.pending[echo]
+	delete(r.pending, echo)
+	r.callMu.Unlock()
+	if ok {
+		ch <- &callResult{err: err}
 	}
 }
 
@@ -390,10 +440,10 @@ func (r *Adapter) resolve(echo string, result *ApiResult) {
 func (r *Adapter) failPending(err error) {
 	r.callMu.Lock()
 	pending := r.pending
-	r.pending = make(map[string]chan *ApiResult)
+	r.pending = make(map[string]chan *callResult)
 	r.callMu.Unlock()
-	for echo, ch := range pending {
-		ch <- &ApiResult{Status: "failed", RetCode: -1, Message: err.Error(), Echo: echo}
+	for _, ch := range pending {
+		ch <- &callResult{err: err}
 	}
 }
 
@@ -409,7 +459,10 @@ func (r *Adapter) reply(act *Action, result *ApiResult, err error) {
 		return
 	}
 	if err != nil {
+		// 回执中保留原始错误链; 同时携带 retcode=-1 的标准回执信息
 		result = &ApiResult{Status: "failed", RetCode: -1, Message: err.Error(), Echo: act.Echo}
+		r.resolveErr(act.Echo, fmt.Errorf("%w (retcode=-1, message=%s)", err, result.Message))
+		return
 	}
 	r.resolve(act.Echo, result)
 }
@@ -513,9 +566,9 @@ func (r *Adapter) onPayload(conn *gws.Conn, data []byte) {
 
 	switch probe.PostType {
 	case "message":
-		r.onMessageEvent(data, probe.SelfID)
+		r.onMessageEvent(conn, data, probe.SelfID)
 	case "meta_event":
-		r.onMetaEvent(data)
+		r.onMetaEvent(conn, data)
 	case "notice":
 		r.onNoticeEvent(data, probe.SelfID)
 	default:
@@ -524,60 +577,69 @@ func (r *Adapter) onPayload(conn *gws.Conn, data []byte) {
 }
 
 // onMessageEvent 处理私聊/群聊消息事件, 转换为统一消息后投递接收管道
-func (r *Adapter) onMessageEvent(data []byte, selfID int64) {
-	ev := UnionEvent{
-		EventType: MessageEventType,
-		EventData: data,
-		SelfID:    selfID,
+func (r *Adapter) onMessageEvent(conn *gws.Conn, data []byte, selfID int64) {
+	var ev MessageEvent
+	if err := json.Unmarshal(data, &ev); err != nil {
+		log.Printf("[onebot] discard invalid message event: %v", err)
+		return
 	}
 
-	r.push(ev)
+	// 上报未携带 self_id 时, 用连接已绑定的身份兜底
+	self := fmt.Sprint(ev.SelfID)
+	if ev.SelfID == 0 {
+		self = r.connSelfID(conn)
+	}
+	if self == "" || self == "0" {
+		log.Printf("[onebot] discard message event without self_id")
+		return
+	}
+
+	msgType := common.Group
+	chatID := fmt.Sprint(ev.GroupID)
+	if ev.MessageType == "private" {
+		msgType = common.Private
+		chatID = fmt.Sprint(ev.UserID)
+	}
+
+	content, mentionedSelf := convertSegments(ev.Message, self)
+
+	name := ev.Sender.Card
+	if name == "" {
+		name = ev.Sender.Nickname
+	}
+
+	msg := common.Message{
+		MessageID:   fmt.Sprint(ev.MessageID),
+		Platform:    common.Onebot,
+		MessageType: msgType,
+		ChatID:      chatID,
+		SelfID:      self,
+		Sender: common.Sender{
+			UID:     fmt.Sprint(ev.Sender.UserID),
+			Name:    name,
+			IsBot:   ev.Sender.UserID == ev.SelfID,
+			IsAdmin: ev.Sender.Role == "admin" || ev.Sender.Role == "owner",
+		},
+		Timestamp:     ev.Time,
+		MentionedSelf: mentionedSelf,
+		Content:       content,
+		Original:      json.RawMessage(data),
+	}
+	r.push(msg)
 }
 
-// func (r *Adapter) onMessageEvent(data []byte) {
-// 	var ev MessageEvent
-// 	if err := json.Unmarshal(data, &ev); err != nil {
-// 		log.Printf("[onebot] discard invalid message event: %v", err)
-// 		return
-// 	}
+// connSelfID 查询连接已绑定的 self_id, 未绑定返回空串
+func (r *Adapter) connSelfID(conn *gws.Conn) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if p, ok := r.conns[conn]; ok {
+		return p.selfID
+	}
+	return ""
+}
 
-// 	selfID := fmt.Sprint(ev.SelfID)
-// 	msgType := common.Group
-// 	chatID := fmt.Sprint(ev.GroupID)
-// 	if ev.MessageType == "private" {
-// 		msgType = common.Private
-// 		chatID = fmt.Sprint(ev.UserID)
-// 	}
-
-// 	content, mentionedSelf := convertSegments(ev.Message, selfID)
-
-// 	name := ev.Sender.Card
-// 	if name == "" {
-// 		name = ev.Sender.Nickname
-// 	}
-
-// 	msg := common.Message{
-// 		MessageID:   fmt.Sprint(ev.MessageID),
-// 		Platform:    common.Onebot,
-// 		MessageType: msgType,
-// 		ChatID:      chatID,
-// 		SelfID:      selfID,
-// 		Sender: common.Sender{
-// 			UID:     fmt.Sprint(ev.Sender.UserID),
-// 			Name:    name,
-// 			IsBot:   ev.Sender.UserID == ev.SelfID,
-// 			IsAdmin: ev.Sender.Role == "admin" || ev.Sender.Role == "owner",
-// 		},
-// 		Timestamp:     ev.Time,
-// 		MentionedSelf: mentionedSelf,
-// 		Content:       content,
-// 		Original:      json.RawMessage(data),
-// 	}
-// 	r.push(msg)
-// }
-
-// onMetaEvent 处理心跳与生命周期事件
-func (r *Adapter) onMetaEvent(data []byte) {
+// onMetaEvent 处理心跳与生命周期事件: 心跳仅刷新 lastBeat, lifecycle 投递通知管道
+func (r *Adapter) onMetaEvent(conn *gws.Conn, data []byte) {
 	var meta struct {
 		MetaEventType string `json:"meta_event_type"`
 		SubType       string `json:"sub_type"`
@@ -585,39 +647,33 @@ func (r *Adapter) onMetaEvent(data []byte) {
 	if err := json.Unmarshal(data, &meta); err != nil {
 		return
 	}
-	if meta.MetaEventType == "heartbeat" {
+	switch meta.MetaEventType {
+	case "heartbeat":
 		var beat struct {
 			SelfID int64 `json:"self_id"`
 		}
 		if err := json.Unmarshal(data, &beat); err == nil {
 			r.touchPeer(fmt.Sprint(beat.SelfID))
 		}
-		return
+	case "lifecycle":
+		r.pushNotice(UnionEvent{
+			EventType: MetaEventType,
+			EventData: data,
+			SelfID:    r.connSelfIDInt(conn),
+		})
+	default:
+		log.Printf("[onebot] meta_event %s sub_type=%s", meta.MetaEventType, meta.SubType)
 	}
-	log.Printf("[onebot] meta_event %s sub_type=%s", meta.MetaEventType, meta.SubType)
 }
 
-// onNoticeEvent 处理通知类事件 (戳一戳等); 暂只记录日志, 后续可按需扩展独立管道
+// onNoticeEvent 处理通知类事件 (戳一戳等), 投递通知管道 (原始 JSON, 业务层自行解析)
 func (r *Adapter) onNoticeEvent(data []byte, selfID int64) {
-	ev := UnionEvent{
+	r.pushNotice(UnionEvent{
 		EventType: NotifyEventType,
 		EventData: data,
 		SelfID:    selfID,
-	}
-
-	r.push(ev)
+	})
 }
-
-// func (r *Adapter) onNoticeEvent(data []byte, selfID int64) {
-// 	var ev PokeEvent
-// 	if err := json.Unmarshal(data, &ev); err != nil {
-// 		return
-// 	}
-// 	if ev.NoticeType == "notify" && ev.SubType == "poke" {
-// 		log.Printf("[onebot] poke self_id=%d group=%d user=%d target=%d",
-// 			ev.SelfID, ev.GroupID, ev.UserID, ev.TargetID)
-// 	}
-// }
 
 // touchPeer 更新客户端最近心跳时间
 func (r *Adapter) touchPeer(selfID string) {
@@ -628,12 +684,34 @@ func (r *Adapter) touchPeer(selfID string) {
 	r.mu.Unlock()
 }
 
-// push 投递消息到接收管道; 管道满时阻塞 (背压), 适配器停止后丢弃
-func (r *Adapter) push(msg UnionEvent) {
+// push 投递统一消息到接收管道; 管道满时阻塞 (背压), 适配器停止后丢弃
+func (r *Adapter) push(msg common.Message) {
 	select {
 	case <-r.done:
 	case r.inbound <- msg:
 	}
+}
+
+// pushNotice 投递事件到通知管道; 管道满时阻塞 (背压), 适配器停止后丢弃
+func (r *Adapter) pushNotice(ev UnionEvent) {
+	select {
+	case <-r.done:
+	case r.notices <- ev:
+	}
+}
+
+// connSelfIDInt 查询连接已绑定的 self_id (数值形式), 未绑定返回 0
+func (r *Adapter) connSelfIDInt(conn *gws.Conn) int64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if p, ok := r.conns[conn]; ok {
+		id, err := strconv.ParseInt(p.selfID, 10, 64)
+		if err != nil {
+			return 0
+		}
+		return id
+	}
+	return 0
 }
 
 // authorize 握手鉴权: 校验 Authorization 头 (Bearer/Token) 或 access_token 查询参数

@@ -1,6 +1,9 @@
 package onebot
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 const (
 	MessageEventType = "event.message"
@@ -100,9 +103,17 @@ type ApiResult struct {
 	Echo    string          `json:"echo"`
 }
 
-// CurrentStatus 当前状态
+// CurrentState 当前状态
 type CurrentState struct {
 	IsRunning bool
-	PeerList  map[string]*peer
+	PeerList  map[string]PeerState // self_id -> 状态快照
 	PeerCount int
+}
+
+// PeerState 已接入客户端的状态快照 (导出结构, 供外部读取)
+type PeerState struct {
+	Session    string    // 接入时分配的会话 ID
+	SelfID     string    // 机器人自身 ID, 首个事件上报后绑定
+	RemoteAddr string    // 客户端地址
+	LastBeat   time.Time // 最近心跳时间
 }

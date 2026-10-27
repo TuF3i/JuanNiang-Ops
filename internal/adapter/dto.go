@@ -24,3 +24,25 @@ type OneBotConfig struct {
 
 // Onebot11 表名
 func (OneBotConfig) TableName() string { return "onebot_configs" }
+
+// ---------- gorm 钩子: 配置变更 -> 通知 runtime 重建适配器 ----------
+// 只挂 Create/Update/Delete 三个钩子 (Save 内部为 Create 或 Update, 不会双触发).
+// ⚠️ 批量更新不带主键不触发 AfterUpdate, 更新配置必须带主键, 详见 hooks.go 包注释.
+
+// AfterCreate 创建配置后通知
+func (OneBotConfig) AfterCreate(*gorm.DB) error {
+	notifyConfigChanged()
+	return nil
+}
+
+// AfterUpdate 更新配置后通知
+func (OneBotConfig) AfterUpdate(*gorm.DB) error {
+	notifyConfigChanged()
+	return nil
+}
+
+// AfterDelete 删除配置后通知
+func (OneBotConfig) AfterDelete(*gorm.DB) error {
+	notifyConfigChanged()
+	return nil
+}

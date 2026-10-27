@@ -10,4 +10,5 @@ var (
 	ErrNoPeer        = errors.New("onebot: no client connected")
 	ErrUnknownPeer   = errors.New("onebot: target client not connected")
 	ErrAmbiguousPeer = errors.New("onebot: multiple clients connected, target required")
+	ErrApiFailed     = errors.New("onebot: api call failed")
 )
