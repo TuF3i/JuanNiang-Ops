@@ -22,7 +22,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"JuanNiang-Ops/internal/adapter/onebot"
+	"JuanNiang-Ops/internal/adapter_old/onebot"
 )
 
 // 默认配置值
@@ -38,12 +38,12 @@ const reconcileInterval = 30 * time.Second
 // AdapterRuntime 适配器生命周期管理器.
 // 单条配置 (onebot_configs 首行) -> 单个 OneBot 适配器实例, 配置变更时自动重建.
 type AdapterRuntime struct {
-	mu      sync.Mutex // 保护 adapter/cfg, 且串行化 reconcile
-	db      *gorm.DB
+	mu sync.Mutex // 保护 adapter/cfg, 且串行化 reconcile
+	db *gorm.DB
 	// 当前平台适配器实例 (实现 Start/Stop/Inbound/Notices/Done + MessageSender), 未启动时为 nil.
 	// 持有平台无关视角: onebot.Adapter 等具体实现通过 Adapterer 隐式匹配, 发送能力经 MessageSender 断言.
 	adapter Adapterer
-	cfg     OneBotConfig    // 当前生效配置快照
+	cfg     OneBotConfig // 当前生效配置快照
 
 	handlers handlerSet // 事件 handler (见 event.go)
 

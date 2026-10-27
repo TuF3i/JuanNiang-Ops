@@ -13,7 +13,7 @@ import (
 
 	"github.com/lxzan/gws"
 
-	"JuanNiang-Ops/internal/adapter/common"
+	"JuanNiang-Ops/internal/adapter_old/common"
 	"JuanNiang-Ops/pkg/uerr"
 )
 
@@ -27,7 +27,7 @@ type testClient struct {
 	closedF bool
 }
 
-func (c *testClient) OnOpen(_ *gws.Conn)     {}
+func (c *testClient) OnOpen(_ *gws.Conn) {}
 func (c *testClient) OnClose(_ *gws.Conn, _ error) {
 	select {
 	case <-c.closed:
@@ -44,8 +44,8 @@ func (c *testClient) OnMessage(_ *gws.Conn, message *gws.Message) {
 	default: // 缓冲满则丢弃, 测试场景不会堆积
 	}
 }
-func (c *testClient) OnPing(_ *gws.Conn, _ []byte)  {}
-func (c *testClient) OnPong(_ *gws.Conn, _ []byte)  {}
+func (c *testClient) OnPing(_ *gws.Conn, _ []byte) {}
+func (c *testClient) OnPong(_ *gws.Conn, _ []byte) {}
 
 // newTestClient 连接适配器 (可指定请求头)
 func newTestClient(t *testing.T, addr string, header http.Header) *testClient {

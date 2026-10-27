@@ -13,8 +13,8 @@ import (
 	"errors"
 	"fmt"
 
-	"JuanNiang-Ops/internal/adapter/common"
-	"JuanNiang-Ops/internal/adapter/onebot"
+	"JuanNiang-Ops/internal/adapter_old/common"
+	"JuanNiang-Ops/internal/adapter_old/onebot"
 )
 
 // MessageSender 平台发送能力接口, 各平台适配器 (onebot/...) 需实现.

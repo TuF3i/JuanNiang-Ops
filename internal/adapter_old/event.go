@@ -6,8 +6,8 @@ import (
 	"log"
 	"sync"
 
-	"JuanNiang-Ops/internal/adapter/common"
-	"JuanNiang-Ops/internal/adapter/onebot"
+	"JuanNiang-Ops/internal/adapter_old/common"
+	"JuanNiang-Ops/internal/adapter_old/onebot"
 )
 
 // MessageHandler 统一消息处理器.
@@ -20,9 +20,9 @@ type NoticeHandler func(ctx context.Context, ev onebot.UnionEvent)
 
 // handlerSet handler 集合, RWMutex 保护 (运行时注册, 泵内并发读)
 type handlerSet struct {
-	mu      sync.RWMutex
-	onMsg   []MessageHandler
-	onNote  []NoticeHandler
+	mu     sync.RWMutex
+	onMsg  []MessageHandler
+	onNote []NoticeHandler
 }
 
 // add 注册消息/通知 handler

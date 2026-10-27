@@ -17,7 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/lxzan/gws"
 
-	"JuanNiang-Ops/internal/adapter/common"
+	"JuanNiang-Ops/internal/adapter_old/common"
 	"JuanNiang-Ops/pkg/uerr"
 )
 

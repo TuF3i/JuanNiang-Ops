@@ -3,7 +3,7 @@ package adapter
 import (
 	"testing"
 
-	"JuanNiang-Ops/internal/adapter/onebot"
+	"JuanNiang-Ops/internal/adapter_old/onebot"
 )
 
 // TestOnebotAdapterImplementsInterfaces 编译期断言: onebot.Adapter 满足统一抽象层接口.
