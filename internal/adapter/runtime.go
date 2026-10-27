@@ -32,6 +32,8 @@ type Runtime struct {
 	OnebotDriver  *OnebotDriverV11
 
 	mu sync.Mutex
+
+	// eventChan chan <- common.Event
 }
 
 func CreateRuntime() (*Runtime, error) {}
