@@ -57,6 +57,28 @@ docs/                   文档（含实施计划）
 
 ## 适配器架构（internal/adapter）
 
+分层（平台无关抽象 ↔ 平台实现）：
+
+```
+业务层
+  │ 统一消息 common.Message / MessagePart / SendReceipt
+  ▼
+AdapterRuntime (runtime.go / sender.go / event.go)   ← 统一抽象层: 生命周期 / 事件泵 / 发送入口
+  │ Adapterer + MessageSender 接口 (隐式匹配)
+  ▼
+onebot.Adapter (onebot/)                             ← 平台实现层: OneBot v11 协议通信与格式转换
+```
+
+- **adapter 层（统一抽象）**：`Adapterer`（Start/Stop/Done/Inbound/Notices/GetCurrentState）与
+  `MessageSender`（SendGroup/SendPrivate）接口定义于 sender.go；`AdapterRuntime` 对业务层提供
+  统一发送入口 `SendGroup/SendPrivate/Reply`，委托给当前生效的平台实例，返回统一回执
+  `common.SendReceipt`（哨兵错误 `ErrNoSender/ErrUnsupportedSend`）。
+- **onebot 层（平台实现）**：只负责与 NapCat 等 OneBot 实现端的 WebSocket 通信、
+  OneBot 事件 → `common.Message` 转换、`common.MessagePart` → OneBot 段转换
+  （`convertSegments` / `PartsToSegments`）、API 回执 → `SendReceipt` 填充。
+- 新平台（如飞书）接入方式：实现 `Adapterer` + `MessageSender`，经隐式接口注册进 `AdapterRuntime`；
+  `sender_test.go` 中的编译期断言锁定契约。
+
 每个平台适配器必须提供：
 
 | 成员 | 语义 |
@@ -82,8 +104,9 @@ OneBot 适配器要点：
 - 多机器人：`Action.Target` 指定 `self_id` 精确路由；单端自动路由；多端未指定返回 `ErrAmbiguousPeer`。
 - 消息转换是双向的：接收侧 `convertSegments`（OneBot 段 → `common.MessagePart`），
   发送侧 `PartsToSegments`（统一部件 → OneBot 段，未知部件/非法 ID 返回错误而非静默丢弃）。
-- 发消息 API 接受统一消息部件：`SendGroupMsg/SendPrivateMsg`（fire-and-forget）与
-  `CallGroupMsg/CallPrivateMsg`（等待回执），业务层无需接触 OneBot 原生段结构。
+- 实现 `MessageSender`：`SendGroup/SendPrivate(ctx, chatID, parts, selfID)` 等待回执并填充
+  `common.SendReceipt.MessageID`（自 `ApiResult.Data.message_id` 提取，`Reply` 字段保留原始 `*ApiResult`）；
+  `selfID` 传空时单端自动路由、多端返回 `ErrAmbiguousPeer`。
 - `Call(ctx, target, action, params)`：echo 关联的请求-响应模式；本地失败（路由/序列化/写连接）
   经 pending 通道直接返回原始错误（`errors.Is` 可判 `ErrNoPeer/ErrUnknownPeer/ErrAmbiguousPeer/ErrNotRunning`）；
   远端 retcode≠0 返回错误并包装 `uerr.ErrApiFailed`。

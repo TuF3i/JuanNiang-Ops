@@ -490,7 +490,7 @@ func TestSendWithCommonParts(t *testing.T) {
 	c.send(t, map[string]any{"time": 1, "self_id": 10000, "post_type": "meta_event", "meta_event_type": "heartbeat"})
 	waitPeer(t, a, "10000")
 
-	// 统一部件 -> 私聊发送 -> 客户端收到合法 OneBot JSON
+	// 统一部件 -> 私聊发送 (MessageSender 实现) -> 客户端收到合法 OneBot JSON
 	err := a.SendPrivateMsg("10000", 20001, []common.MessagePart{
 		common.ReplyPart{MessageID: "42"},
 		common.TextPart{Text: "hello"},
@@ -524,19 +524,32 @@ func TestSendWithCommonParts(t *testing.T) {
 		t.Errorf("segment types = %v", act.Params.Message)
 	}
 
-	// 非法部件 (非数字 Mention) 应报错且不发送
-	err = a.SendGroupMsg("10000", 888, []common.MessagePart{common.MentionPart{UserID: "not-a-qq"}})
-	if err == nil || !strings.Contains(err.Error(), "invalid user_id") {
-		t.Fatalf("invalid part: want error, got %v", err)
+	// 非法 chatID 应报错且不发送
+	if _, err := a.SendGroup(context.Background(), "not-a-number", nil, "10000"); err == nil ||
+		!strings.Contains(err.Error(), "invalid group chat_id") {
+		t.Fatalf("invalid chat_id: want error, got %v", err)
 	}
 
-	// Call 版本: 统一部件 + 回执往返
+	// SendGroup 实现: 统一部件 + 回执往返 (message_id 提取到 SendReceipt)
 	go func() { _ = recvApiCall(t, c, 0) }()
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
-	result, err := a.CallGroupMsg(ctx, "10000", 888, []common.MessagePart{common.TextPart{Text: "via call"}})
-	if err != nil || result.RetCode != 0 {
-		t.Fatalf("call group: result=%+v err=%v", result, err)
+	receipt, err := a.SendGroup(ctx, "888", []common.MessagePart{common.TextPart{Text: "via sender"}}, "10000")
+	if err != nil {
+		t.Fatalf("send group: %v", err)
+	}
+	if receipt.MessageID != "1001" {
+		t.Errorf("receipt.message_id = %q, want 1001", receipt.MessageID)
+	}
+	if _, ok := receipt.Reply.(*ApiResult); !ok {
+		t.Errorf("receipt.reply type = %T, want *ApiResult", receipt.Reply)
+	}
+
+	// 远端失败: retcode!=0 -> 错误包含 ErrApiFailed
+	go func() { _ = recvApiCall(t, c, 1200) }()
+	_, err = a.SendPrivate(ctx, "20001", []common.MessagePart{common.TextPart{Text: "x"}}, "10000")
+	if !errors.Is(err, uerr.ErrApiFailed) {
+		t.Fatalf("failed send: want ErrApiFailed, got %v", err)
 	}
 }
 

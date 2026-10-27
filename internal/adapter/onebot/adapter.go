@@ -300,28 +300,61 @@ func (r *Adapter) SendPrivateMsg(target string, userID int64, parts []common.Mes
 	)
 }
 
-// CallGroupMsg 发送群消息并等待回执 (统一消息部件版本)
-func (r *Adapter) CallGroupMsg(ctx context.Context, target string, groupID int64, parts []common.MessagePart) (*ApiResult, error) {
-	segments, err := PartsToSegments(parts)
+// ---------- 实现 adapter.MessageSender 接口 (统一发送入口) ----------
+
+// SendGroup 实现 MessageSender: 群消息 (chatID 为群号)
+func (r *Adapter) SendGroup(ctx context.Context, chatID string, parts []common.MessagePart, selfID string) (*common.SendReceipt, error) {
+	id, err := strconv.ParseInt(chatID, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("onebot: invalid group chat_id %q: %w", chatID, err)
+	}
+	result, err := r.Call(ctx, selfID, "send_group_msg", map[string]any{
+		"group_id": id,
+		"message":  mustPartsToSegments(parts),
+	})
 	if err != nil {
 		return nil, err
 	}
-	return r.Call(ctx, target, "send_group_msg", map[string]any{
-		"group_id": groupID,
-		"message":  segments,
-	})
+	return r.receiptOf(result)
 }
 
-// CallPrivateMsg 发送私聊消息并等待回执 (统一消息部件版本)
-func (r *Adapter) CallPrivateMsg(ctx context.Context, target string, userID int64, parts []common.MessagePart) (*ApiResult, error) {
-	segments, err := PartsToSegments(parts)
+// SendPrivate 实现 MessageSender: 私聊消息 (chatID 为对方 QQ 号)
+func (r *Adapter) SendPrivate(ctx context.Context, chatID string, parts []common.MessagePart, selfID string) (*common.SendReceipt, error) {
+	id, err := strconv.ParseInt(chatID, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("onebot: invalid private chat_id %q: %w", chatID, err)
+	}
+	result, err := r.Call(ctx, selfID, "send_private_msg", map[string]any{
+		"user_id": id,
+		"message": mustPartsToSegments(parts),
+	})
 	if err != nil {
 		return nil, err
 	}
-	return r.Call(ctx, target, "send_private_msg", map[string]any{
-		"user_id": userID,
-		"message": segments,
-	})
+	return r.receiptOf(result)
+}
+
+// mustPartsToSegments 统一部件转 OneBot 段; 转换失败以 error 值形式随结果返回
+func mustPartsToSegments(parts []common.MessagePart) (segments []Segment) {
+	segments, err := PartsToSegments(parts)
+	if err != nil {
+		return []Segment{{Type: "__invalid__", Data: map[string]any{"error": err.Error()}}}
+	}
+	return segments
+}
+
+// receiptOf 从 API 回执提取统一发送回执 (message_id)
+func (r *Adapter) receiptOf(result *ApiResult) (*common.SendReceipt, error) {
+	receipt := &common.SendReceipt{Reply: result}
+	if len(result.Data) > 0 {
+		var data struct {
+			MessageID json.Number `json:"message_id"`
+		}
+		if err := json.Unmarshal(result.Data, &data); err == nil && data.MessageID != "" {
+			receipt.MessageID = data.MessageID.String()
+		}
+	}
+	return receipt, nil
 }
 
 // runWebSocket accept 循环. 不使用 gws.RunListener —— 它在 listener 关闭后

@@ -40,7 +40,9 @@ const reconcileInterval = 30 * time.Second
 type AdapterRuntime struct {
 	mu      sync.Mutex // 保护 adapter/cfg, 且串行化 reconcile
 	db      *gorm.DB
-	adapter *onebot.Adapter // 当前适配器实例, 未启动时为 nil
+	// 当前平台适配器实例 (实现 Start/Stop/Inbound/Notices/Done + MessageSender), 未启动时为 nil.
+	// 持有平台无关视角: onebot.Adapter 等具体实现通过 Adapterer 隐式匹配, 发送能力经 MessageSender 断言.
+	adapter Adapterer
 	cfg     OneBotConfig    // 当前生效配置快照
 
 	handlers handlerSet // 事件 handler (见 event.go)
