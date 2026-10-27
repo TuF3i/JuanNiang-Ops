@@ -45,7 +45,7 @@ internal/
   api/                  HTTP API（待实现）
   db/                   数据访问（dao / cache，待实现）
   workflow/             工作流（待实现）
-inferstructure/         基础设施客户端（postgres / redis / t2i）
+infrastructure/         基础设施客户端（postgres / redis / t2i）
 pkg/                    可对外复用的库（pkg/uerr 哨兵错误）
 sql/                    数据库迁移脚本（空）
 web/                    前端（空）

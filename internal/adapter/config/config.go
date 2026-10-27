@@ -16,14 +16,16 @@ func NewConfigManager(db *gorm.DB) *ConfigManager {
 }
 
 func (r *ConfigManager) UpdateConfig(cfg *OneBotConfig) error {
-	err := r.db.First(&OneBotConfig{}).Save(cfg).Error
-	return fmt.Errorf("update config -> %v", err.Error())
+	// cfg 必须携带主键 (先 GetConfig 再修改), 否则 Save 会走 Insert 分支
+	if err := r.db.Save(cfg).Error; err != nil {
+		return fmt.Errorf("update config -> %w", err)
+	}
+	return nil
 }
 
 func (r *ConfigManager) SetupConfig() error {
-	err := r.db.AutoMigrate(&OneBotConfig{})
-	if err != nil {
-		return fmt.Errorf("setup config -> %v", err.Error())
+	if err := r.db.AutoMigrate(&OneBotConfig{}); err != nil {
+		return fmt.Errorf("setup config -> %w", err)
 	}
 
 	defaultConfig := OneBotConfig{
@@ -37,9 +39,9 @@ func (r *ConfigManager) SetupConfig() error {
 		ActionBuffer:  defaultActionBuffer,
 	}
 
-	err = r.db.Create(&defaultConfig).Clauses(clause.OnConflict{DoNothing: true}).Error
-	if err != nil {
-		return fmt.Errorf("setup config -> %v", err.Error())
+	// Clauses 必须挂在 Create 之前, 否则 SQL 已执行、子句不生效 (幂等插入失败)
+	if err := r.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&defaultConfig).Error; err != nil {
+		return fmt.Errorf("setup config -> %w", err)
 	}
 
 	return nil
@@ -50,7 +52,7 @@ func (r *ConfigManager) GetConfig() (*OneBotConfig, error) {
 
 	err := r.db.First(&data).Error
 	if err != nil {
-		return nil, fmt.Errorf("get config -> %v", err.Error())
+		return nil, fmt.Errorf("get config -> %w", err)
 	}
 
 	return &data, nil

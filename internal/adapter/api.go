@@ -15,13 +15,13 @@ func (r *Runtime) EnableDriver(driverType DriverType) error { // status, error
 		default:
 			err := r.enableOnebotDriverV11()
 			if err != nil {
-				return fmt.Errorf("enable driver -> %v", err.Error())
+				return fmt.Errorf("enable driver -> %w", err)
 			}
 			return nil
 		}
 		// TODO: 飞书
 	default:
-		return fmt.Errorf("enable driver -> unknow driver type")
+		return fmt.Errorf("enable driver -> unknown driver type")
 	}
 }
 
@@ -30,17 +30,17 @@ func (r *Runtime) DisabledDriver(driverType DriverType) error {
 	case OnebotDriver:
 		select {
 		case <-r.OnebotDriver.ctx.Done():
-			return fmt.Errorf("enable driver -> driver is shutting down")
+			return fmt.Errorf("disable driver -> driver is shutting down")
 		default:
-			err := r.enableOnebotDriverV11()
+			err := r.disableOnebotDriverV11()
 			if err != nil {
-				return fmt.Errorf("disable driver -> %v", err.Error())
+				return fmt.Errorf("disable driver -> %w", err)
 			}
 			return nil
 		}
 		// TODO: 飞书
 	default:
-		return fmt.Errorf("enable driver -> unknow driver type")
+		return fmt.Errorf("disable driver -> unknown driver type")
 	}
 }
 
@@ -49,12 +49,12 @@ func (r *Runtime) UpdateRuntimeConfig(cfg any) error {
 	case *config.OneBotConfig:
 		src, err := r.ConfigManager.GetConfig()
 		if err != nil {
-			return fmt.Errorf("update runtime config -> %v", err.Error())
+			return fmt.Errorf("update runtime config -> %w", err)
 		}
 
 		ok, err := r.equal(src, dst)
 		if err != nil {
-			return fmt.Errorf("update runtime config -> %v", err.Error())
+			return fmt.Errorf("update runtime config -> %w", err)
 		}
 
 		if ok {
@@ -63,7 +63,7 @@ func (r *Runtime) UpdateRuntimeConfig(cfg any) error {
 
 		err = r.ConfigManager.UpdateConfig(dst)
 		if err != nil {
-			return fmt.Errorf("update runtime config -> %v", err.Error())
+			return fmt.Errorf("update runtime config -> %w", err)
 		}
 		return nil
 		// TODO: 飞书
@@ -80,7 +80,7 @@ func (r *Runtime) GetAdapterStatus(driverType DriverType) (*common.RuntimeState,
 	case OnebotDriver:
 		return r.OnebotDriver.driver.GetCurrentState(), nil
 	default:
-		return nil, fmt.Errorf("get adapter status -> unknow driver type")
+		return nil, fmt.Errorf("get adapter status -> unknown driver type")
 	}
 }
 
@@ -90,7 +90,7 @@ func (r *Runtime) GetAdapterConfig(driverType DriverType) (*config.OneBotConfig,
 
 	cfg, err := r.ConfigManager.GetConfig()
 	if err != nil {
-		return nil, fmt.Errorf("get adapter config -> %v", err.Error())
+		return nil, fmt.Errorf("get adapter config -> %w", err)
 	}
 
 	return cfg, nil
@@ -102,7 +102,7 @@ func (r *Runtime) SendGroupMessage(target string, groupID int64, msg []common.Me
 
 	driverType, err := r.route(target)
 	if err != nil {
-		return fmt.Errorf("send group message -> %v", err.Error())
+		return fmt.Errorf("send group message -> %w", err)
 	}
 
 	switch driverType {
@@ -113,11 +113,11 @@ func (r *Runtime) SendGroupMessage(target string, groupID int64, msg []common.Me
 
 		select {
 		case <-r.OnebotDriver.ctx.Done():
-			return fmt.Errorf("send group message -> driver is shuting down")
+			return fmt.Errorf("send group message -> driver is shutting down")
 		default:
 			err := r.OnebotDriver.driver.SendGroupMsg(target, groupID, msg)
 			if err != nil {
-				return fmt.Errorf("send group message -> %v", err.Error())
+				return fmt.Errorf("send group message -> %w", err)
 			}
 
 			return nil
@@ -134,22 +134,22 @@ func (r *Runtime) SendPrivateMessage(target string, userID int64, msg []common.M
 
 	driverType, err := r.route(target)
 	if err != nil {
-		return fmt.Errorf("send group message -> %v", err.Error())
+		return fmt.Errorf("send private message -> %w", err)
 	}
 
 	switch driverType {
 	case OnebotDriver:
 		if !r.OnebotDriver.driver.GetCurrentState().IsRunning {
-			return fmt.Errorf("send group message -> driver is not running")
+			return fmt.Errorf("send private message -> driver is not running")
 		}
 
 		select {
 		case <-r.OnebotDriver.ctx.Done():
-			return fmt.Errorf("send group message -> driver is shuting down")
+			return fmt.Errorf("send private message -> driver is shutting down")
 		default:
 			err := r.OnebotDriver.driver.SendPrivateMsg(target, userID, msg)
 			if err != nil {
-				return fmt.Errorf("send group message -> %v", err.Error())
+				return fmt.Errorf("send private message -> %w", err)
 			}
 
 			return nil

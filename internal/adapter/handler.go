@@ -21,12 +21,12 @@ func (r *Runtime) route(target string) (DriverType, error) {
 func (r *Runtime) equal[T configKind](src *T, dst *T) (bool, error) {
 	srcRaw, err := sonic.Marshal(src)
 	if err != nil {
-		return false, fmt.Errorf("equal -> %v", err.Error())
+		return false, fmt.Errorf("equal -> %w", err)
 	}
 
 	dstRaw, err := sonic.Marshal(dst)
 	if err != nil {
-		return false, fmt.Errorf("equal -> %v", err.Error())
+		return false, fmt.Errorf("equal -> %w", err)
 	}
 
 	if md5.Sum(srcRaw) == md5.Sum(dstRaw) {
@@ -39,14 +39,14 @@ func (r *Runtime) equal[T configKind](src *T, dst *T) (bool, error) {
 func (r *Runtime) enableOnebotDriverV11() error {
 	cfg, err := r.ConfigManager.GetConfig()
 	if err != nil {
-		return fmt.Errorf("enable onebot driver v11 -> %v", err.Error())
+		return fmt.Errorf("enable onebot driver v11 -> %w", err)
 	}
 
 	cfg.Enable = true
 
 	err = r.ConfigManager.UpdateConfig(cfg)
 	if err != nil {
-		return fmt.Errorf("enable onebot driver v11 -> %v", err.Error())
+		return fmt.Errorf("enable onebot driver v11 -> %w", err)
 	}
 
 	r.OnebotDriver.cfg = *cfg
@@ -59,14 +59,14 @@ func (r *Runtime) enableOnebotDriverV11() error {
 func (r *Runtime) disableOnebotDriverV11() error {
 	cfg, err := r.ConfigManager.GetConfig()
 	if err != nil {
-		return fmt.Errorf("disable onebot driver v11 -> %v", err.Error())
+		return fmt.Errorf("disable onebot driver v11 -> %w", err)
 	}
 
 	cfg.Enable = false
 
 	err = r.ConfigManager.UpdateConfig(cfg)
 	if err != nil {
-		return fmt.Errorf("disable onebot driver v11 -> %v", err.Error())
+		return fmt.Errorf("disable onebot driver v11 -> %w", err)
 	}
 
 	r.OnebotDriver.cfg = *cfg

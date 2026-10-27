@@ -165,4 +165,4 @@ go test ./internal/adapter/onebot/ -race
 
 - `onebot.Adapter.Stop()` 六步顺序、done-channel 写入模式（AGENT.md 勿改项）
 - 鉴权、路由（route/bindSelfID）、Call pending 机制
-- `inferstructure/postgres`、`config/viper`、`cmd`、`internal/api`（空壳不在本次范围）
+- `infrastructure/postgres`、`config/viper`、`cmd`、`internal/api`（空壳不在本次范围）

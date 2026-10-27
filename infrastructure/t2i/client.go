@@ -1,7 +1,7 @@
 package t2i
 
 import (
-	handler "JuanNiang-Ops/inferstructure/t2i/handler"
+	handler "JuanNiang-Ops/infrastructure/t2i/handler"
 	"fmt"
 	"net/http"
 	"time"
