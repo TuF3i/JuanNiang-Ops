@@ -40,7 +40,7 @@ type Message struct {
 	Original      any // 原始事件
 }
 
-// SendReceipt 发送回执 (统一抽象, 各平台适配器负责从平台回执填充)
+// SendReceipt 发送回执 (统一抽象, 各平台 Driver 负责从平台回执填充)
 type SendReceipt struct {
 	MessageID string // 平台消息 ID (发送成功后由平台分配)
 	Reply     any    // 平台原始回执 (OneBot ApiResult / 飞书回执...), 需要时由业务层断言

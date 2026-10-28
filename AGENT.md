@@ -35,20 +35,23 @@ cmd/                    程序入口（cobra，待实现）
 config/viper/           配置加载（viper，待实现）
 internal/
   adapter/              平台适配器 ★ 最完整的模块
-    runtime.go          AdapterRuntime 生命周期管理器（配置联动 / reconcile / 事件泵）
-    hooks.go            gorm 钩子 -> 包级配置变更通知
-    handler.go          事件泵与 handler 分发
-    dto.go              OneBotConfig（gorm 模型，配置存 DB，含变更钩子）
-    common/             平台无关的统一消息模型（Message / MessagePart）
-    onebot/             OneBot v11 正向 WS 适配器（含单元测试）
+    runtime.go          Runtime 生命周期管理器（CreateRuntime/ReleaseRuntime/事件合流管道）
+    handler.go          驱动启停/重建链路 + 发送路由
+    api.go              对业务层的运行时 API（开关/配置/发送）
+    util.go             配置对比（sonic+MD5）
+    config/             平台配置模型与 ConfigManager（onebot_configs / feishu_configs）
+    common/             平台无关统一模型（Event/Message/MessagePart/SendReceipt/RuntimeState）
+    driver/             Driver 统一接口 + 平台实现
+      onebot/           OneBot v11 正向 WS 驱动（含单测）
+      feishu/           飞书 WSS 长连接驱动（官方 SDK，含单测）
   agent/                Agent 编排（待实现）
   api/                  HTTP API（待实现）
   db/                   数据访问（dao / cache，待实现）
   workflow/             工作流（待实现）
 infrastructure/         基础设施客户端（postgres / redis / t2i）
-pkg/                    可对外复用的库（pkg/uerr 哨兵错误）
+pkg/                    可对外复用的库
 sql/                    数据库迁移脚本（空）
-web/                    前端（空）
+web/                    前端（Vue3 + Vite 脚手架）
 deployment/             部署清单（空）
 docs/                   文档（含实施计划）
 ```
@@ -60,32 +63,45 @@ docs/                   文档（含实施计划）
 分层（平台无关抽象 ↔ 平台实现）：
 
 ```
-业务层
-  │ 统一消息 common.Message / MessagePart / SendReceipt
+业务层 (agent / workflow / api)
+  │ 消费: rt.Events() <-chan common.Event     发送: rt.SendGroupMessage / SendPrivateMessage / ReplyMessage
   ▼
-AdapterRuntime (runtime.go / sender.go / event.go)   ← 统一抽象层: 生命周期 / 事件泵 / 发送入口
-  │ Adapterer + MessageSender 接口 (隐式匹配)
+Runtime (runtime.go)                          ← 统一抽象层: 装配 / 生命周期 / 事件合流 / 发送路由
+  │ driver.Driver 接口 (隐式匹配)
   ▼
-onebot.Adapter (onebot/)                             ← 平台实现层: OneBot v11 协议通信与格式转换
+onebot.Driver / feishu.Driver                 ← 平台实现层: 协议通信与格式转换
 ```
 
-- **adapter 层（统一抽象）**：`Adapterer`（Start/Stop/Done/Inbound/Notices/GetCurrentState）与
-  `MessageSender`（SendGroup/SendPrivate）接口定义于 sender.go；`AdapterRuntime` 对业务层提供
-  统一发送入口 `SendGroup/SendPrivate/Reply`，委托给当前生效的平台实例，返回统一回执
-  `common.SendReceipt`（哨兵错误 `ErrNoSender/ErrUnsupportedSend`）。
-- **onebot 层（平台实现）**：只负责与 NapCat 等 OneBot 实现端的 WebSocket 通信、
-  OneBot 事件 → `common.Message` 转换、`common.MessagePart` → OneBot 段转换
-  （`convertSegments` / `PartsToSegments`）、API 回执 → `SendReceipt` 填充。
-- 新平台（如飞书）接入方式：实现 `Adapterer` + `MessageSender`，经隐式接口注册进 `AdapterRuntime`；
-  `sender_test.go` 中的编译期断言锁定契约。
+- **统一事件模型（common/event.go）**：`Event{Type, SelfID, Message, Notify}`，
+  `Type=EventMessage` 时 `Message` 非 nil（统一消息），`Type=EventNotify` 时 `Notify` 非 nil
+  （`NotifyEvent{Kind, Platform, Data}`，平台原始 JSON 由业务层自行解析）。
+- **Driver 接口（driver/driver.go）**：`Start/Stop/Done + Events() <-chan common.Event +
+  GetCurrentState`。每个平台驱动的消息与通知**合流为一条事件管道**，Stop 时关闭。
+- **Runtime 生命周期（runtime.go）**：
+  - `CreateRuntime(opts ...Option)`：建库（可 `WithDB` 注入，否则 infrastructure 默认连接并自持）
+    → `ConfigManager.SetupConfig()`（onebot/feishu 表幂等初始化）→ 启用中的驱动 Start + 挂转发泵
+    （`driver.Events() → rt.events`）。包级 `defaultRuntime` 记录。
+  - `rt.ReleaseRuntime()` / 包级 `ReleaseRuntime()`：幂等；close(done) → 停全部驱动
+    → 转发泵退出 → close(rt.events) 通知业务层 → 自建 db 关闭。
+- **配置变更→重建（handler.go）**：`UpdateRuntimeConfig` 经 `equal`（sonic+MD5）对比 →
+  落库 → 运行中驱动 `reCreateXxx`（Stop 旧 → New → Start → 重挂转发泵，事件管道不变）；
+  `EnableDriver/DisabledDriver` 落库 + Start/Stop（运行时开关）。
+- **发送路由（handler.go `route`）**：target 非空按已接入 peer 精确匹配；空 target 且恰好一个
+  运行中驱动则自动路由；`SendGroupMessage/SendPrivateMessage(target, chatID string, parts)`
+  统一 chatID 为 string（OneBot 内部 ParseInt，飞书原生 string）；未知驱动类型返回错误。
+- **平台实现职责**：onebot —— 正向 WS 服务端（NapCat 等接入）、OneBot 事件 ↔ 统一模型双向转换
+  （`convertSegments`/`PartsToSegments`）、echo 请求-响应 Call；feishu —— **WebSocket 长连接**
+  （官方 SDK `larksuite/oapi-sdk-go`：`larkws` 收事件 / `lark.NewClient` 发 OpenAPI，
+  token 由 SDK 管理，无需公网回调地址，`FeishuConfig` 无 Addr）、
+  消息转换（纯文本→text / 纯图→image / 混合→post、ReplyPart 走 reply 接口）。
+  测试注入点：`SetWSClient`（mock 长连接）/ `SetOpenBaseUrl` + `SetHTTPClient`（拦截 OpenAPI）。
 
-每个平台适配器必须提供：
+每个平台 Driver 必须提供：
 
 | 成员 | 语义 |
 |---|---|
-| `Start() / Stop()` | 生命周期；Start 幂等（重复调用返回 `ErrRunning`），Stop 幂等且阻塞至完全退出 |
-| `Inbound()` | 接收消息管道 `<-chan common.Message`，平台事件 → 统一消息 → 业务层，Stop 时关闭 |
-| `Outbound()` | 发送指令管道 `chan<- *Action`，业务层 → 平台实现端 |
+| `Start() / Stop()` | 生命周期；Start 幂等（重复调用报错），Stop 幂等且阻塞至完全退出 |
+| `Events()` | 统一事件管道 `<-chan common.Event`（消息+通知合流），Stop 时关闭 |
 | `Done()` | 停止信号 `<-chan struct{}`，与管道配合消费 |
 
 统一消息模型（`common`）：`Message` 由 `[]MessagePart` 组成（Text/Mention/Image/File/Reply…），

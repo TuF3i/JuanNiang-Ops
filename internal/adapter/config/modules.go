@@ -14,6 +14,20 @@ const (
 	defaultActionBuffer  = 64
 )
 
+// defaultOneBotConfig OneBot 默认配置 (幂等种子行)
+func defaultOneBotConfig() OneBotConfig {
+	return OneBotConfig{
+		ID:     1,
+		Addr:   defaultAddr,
+		Token:  defaultToken,
+		Admin:  []string{},
+		Enable: defaultEnable,
+
+		MessageBuffer: defaultMessageBuffer,
+		ActionBuffer:  defaultActionBuffer,
+	}
+}
+
 type OneBotConfig struct {
 	ID        int64          `gorm:"primaryKey;type:bigint;autoIncrement;comment:表自增主键ID"`
 	CreatedAt time.Time      `gorm:"column:created_at;type:timestamp;not null;default:CURRENT_TIMESTAMP;comment:创建时间"`

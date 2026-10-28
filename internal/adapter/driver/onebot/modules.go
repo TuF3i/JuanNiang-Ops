@@ -7,9 +7,6 @@ import (
 	"github.com/lxzan/gws"
 )
 
-// defaultNoticeBuffer 通知管道默认缓冲大小
-const defaultNoticeBuffer = 64
-
 const (
 	MessageEventType = "event.message"
 	NotifyEventType  = "event.notify"
@@ -28,17 +25,6 @@ type peer struct {
 	session  string // 接入时分配的会话 ID, 上报 self_id 前作为占位
 	selfID   string // 机器人自身 ID, 首个事件上报后绑定
 	lastBeat time.Time
-}
-
-// Driver 配置
-type Config struct {
-	Addr   string   // 监听地址, 格式 host:port
-	Token  string   // 接入令牌, 为空则不校验
-	Admin  []string // 管理员列表
-	Enable bool     // 是否启用
-
-	MessageBuffer int // 接收消息管道缓冲大小, 默认 256
-	ActionBuffer  int // 发送指令管道缓冲大小, 默认 64
 }
 
 // BaseEvent 基础事件
@@ -124,19 +110,4 @@ type ApiResult struct {
 	Message string          `json:"message"`
 	Wording string          `json:"wording"`
 	Echo    string          `json:"echo"`
-}
-
-// CurrentState 当前状态
-type CurrentState struct {
-	IsRunning bool
-	PeerList  map[string]PeerState // self_id -> 状态快照
-	PeerCount int
-}
-
-// PeerState 已接入客户端的状态快照 (导出结构, 供外部读取)
-type PeerState struct {
-	Session    string    // 接入时分配的会话 ID
-	SelfID     string    // 机器人自身 ID, 首个事件上报后绑定
-	RemoteAddr string    // 客户端地址
-	LastBeat   time.Time // 最近心跳时间
 }

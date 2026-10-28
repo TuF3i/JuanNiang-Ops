@@ -21,10 +21,9 @@ import (
 )
 
 type Driver struct {
-	cfg Config
+	cfg config.OneBotConfig
 
-	inbound  chan common.Message
-	notices  chan common.UnionEvent
+	events   chan common.Event
 	outbound chan *Action
 
 	mu    sync.RWMutex
@@ -43,7 +42,7 @@ type Driver struct {
 	pending map[string]chan *callResult
 }
 
-// NewDriver 创建适配器, 调用 Start 后管道才会建立
+// NewDriver 创建驱动, 调用 Start 后事件管道才会建立
 func NewDriver(cfg config.OneBotConfig) *Driver {
 	if cfg.MessageBuffer <= 0 {
 		cfg.MessageBuffer = 256
@@ -52,25 +51,15 @@ func NewDriver(cfg config.OneBotConfig) *Driver {
 		cfg.ActionBuffer = 64
 	}
 
-	c := Config{
-		Addr:   cfg.Addr,
-		Token:  cfg.Token,
-		Admin:  cfg.Admin,
-		Enable: cfg.Enable,
-
-		MessageBuffer: cfg.MessageBuffer,
-		ActionBuffer:  cfg.ActionBuffer,
-	}
-
 	return &Driver{
-		cfg:     c,
+		cfg:     cfg,
 		peers:   make(map[string]*peer),
 		conns:   make(map[*gws.Conn]*peer),
 		pending: make(map[string]chan *callResult),
 	}
 }
 
-// Start 启动适配器: 监听端口, 建立收发管道. 重复调用返回 ErrRunning.
+// Start 启动驱动: 监听端口, 建立收发管道. 重复调用返回错误.
 func (r *Driver) Start() error {
 	if !r.cfg.Enable {
 		return fmt.Errorf("onebot -> driver is disabled")
@@ -88,8 +77,7 @@ func (r *Driver) Start() error {
 		return fmt.Errorf("onebot: listen %s: %w", r.cfg.Addr, err)
 	}
 
-	r.inbound = make(chan common.Message, r.cfg.MessageBuffer)
-	r.notices = make(chan common.UnionEvent, defaultNoticeBuffer)
+	r.events = make(chan common.Event, r.cfg.MessageBuffer)
 	r.outbound = make(chan *Action, r.cfg.ActionBuffer)
 	r.done = make(chan struct{})
 	r.listener = listener
@@ -108,8 +96,8 @@ func (r *Driver) Start() error {
 	return nil
 }
 
-// Stop 停止适配器: 关闭监听与所有连接, 排空指令管道, 阻塞至完全退出.
-// 退出后 Inbound 会被关闭, 消费方可通过 range 退出; 之后的投递会返回 uerr.ErrNotRunning.
+// Stop 停止驱动: 关闭监听与所有连接, 排空指令管道, 阻塞至完全退出.
+// 退出后 Events 会被关闭, 消费方可通过 range 退出.
 func (r *Driver) Stop() error {
 	r.mu.Lock()
 	if !r.running {
@@ -136,27 +124,22 @@ func (r *Driver) Stop() error {
 	// 4. 等待内部 goroutine 退出
 	r.wg.Wait()
 
-	// 5. 关闭接收管道 (消息与通知), 通知下游; 清空连接表以便下次 Start
-	close(r.inbound)
-	close(r.notices)
+	// 5. 关闭事件管道, 通知下游; 清空连接表以便下次 Start
+	close(r.events)
 	r.mu.Lock()
 	r.peers = make(map[string]*peer)
 	r.conns = make(map[*gws.Conn]*peer)
 	r.mu.Unlock()
 
-	log.Printf("[onebot] Driver stopped")
+	log.Printf("[onebot] driver stopped")
 	return nil
 }
 
 // Done 返回停止信号通道: Stop 时被关闭. 与管道配合使用:
 func (r *Driver) Done() <-chan struct{} { return r.done }
 
-// Inbound 接收消息管道 (OneBot 消息事件 -> 统一消息 -> 业务层), Start 后可用, Stop 时关闭
-func (r *Driver) Inbound() <-chan common.Message { return r.inbound }
-
-// Notices 通知管道 (OneBot notice/lifecycle 事件, 原始 JSON -> 业务层), Start 后可用, Stop 时关闭.
-// 业务层可使用 PokeEvent / LifeCycleEvent 等结构自行解析 EventData.
-func (r *Driver) Notices() <-chan common.UnionEvent { return r.notices }
+// Events 统一事件管道 (消息 EventMessage / 通知 EventNotify 合流), Start 后可用, Stop 时关闭
+func (r *Driver) Events() <-chan common.Event { return r.events }
 
 // Outbound 发送指令管道 (业务层 -> OneBot), 只写方向. Start 后可用.
 // 适配器停止后其剩余内容会被排空丢弃; 建议优先使用 Send/Call.
@@ -190,7 +173,7 @@ func (r *Driver) GetCurrentState() *common.RuntimeState {
 }
 
 // GetCurrentConfig 获取当前配置
-func (r *Driver) GetCurrentConfig() Config {
+func (r *Driver) GetCurrentConfig() config.OneBotConfig {
 	return r.cfg
 }
 
@@ -245,8 +228,12 @@ func (r *Driver) Call(ctx context.Context, target, action string, params map[str
 	}
 }
 
-// SendGroupMsg 发送群消息: 统一消息部件 -> OneBot 消息段 -> send_group_msg
-func (r *Driver) SendGroupMsg(target string, groupID int64, parts []common.MessagePart) error {
+// SendGroupMsg 发送群消息: 统一消息部件 -> OneBot 消息段 -> send_group_msg (fire-and-forget)
+func (r *Driver) SendGroupMsg(target string, chatID string, parts []common.MessagePart) error {
+	id, err := strconv.ParseInt(chatID, 10, 64)
+	if err != nil {
+		return fmt.Errorf("onebot: invalid group chat_id %q: %w", chatID, err)
+	}
 	segments, err := PartsToSegments(parts)
 	if err != nil {
 		return err
@@ -254,15 +241,19 @@ func (r *Driver) SendGroupMsg(target string, groupID int64, parts []common.Messa
 	return r.Send(
 		"send_group_msg",
 		map[string]any{
-			"group_id": groupID,
+			"group_id": id,
 			"message":  segments,
 		},
 		target,
 	)
 }
 
-// SendPrivateMsg 发送私聊消息: 统一消息部件 -> OneBot 消息段 -> send_private_msg
-func (r *Driver) SendPrivateMsg(target string, userID int64, parts []common.MessagePart) error {
+// SendPrivateMsg 发送私聊消息: 统一消息部件 -> OneBot 消息段 -> send_private_msg (fire-and-forget)
+func (r *Driver) SendPrivateMsg(target string, chatID string, parts []common.MessagePart) error {
+	id, err := strconv.ParseInt(chatID, 10, 64)
+	if err != nil {
+		return fmt.Errorf("onebot: invalid private chat_id %q: %w", chatID, err)
+	}
 	segments, err := PartsToSegments(parts)
 	if err != nil {
 		return err
@@ -270,7 +261,7 @@ func (r *Driver) SendPrivateMsg(target string, userID int64, parts []common.Mess
 	return r.Send(
 		"send_private_msg",
 		map[string]any{
-			"user_id": userID,
+			"user_id": id,
 			"message": segments,
 		},
 		target,
@@ -667,7 +658,7 @@ func (r *Driver) onMessageEvent(conn *gws.Conn, data []byte, selfID int64) {
 		Content:       content,
 		Original:      json.RawMessage(data),
 	}
-	r.push(msg)
+	r.push(common.Event{Type: common.EventMessage, SelfID: self, Message: &msg})
 }
 
 // connSelfID 查询连接已绑定的 self_id, 未绑定返回空串
@@ -698,23 +689,23 @@ func (r *Driver) onMetaEvent(conn *gws.Conn, data []byte) {
 			r.touchPeer(fmt.Sprint(beat.SelfID))
 		}
 	case "lifecycle":
-		r.pushNotice(common.UnionEvent{
-			EventType: MetaEventType,
-			EventData: data,
-			SelfID:    r.connSelfIDInt(conn),
-		})
+		r.pushNotice(common.NotifyEvent{
+			Kind:     MetaEventType,
+			Platform: common.Onebot,
+			Data:     data,
+		}, r.connSelfIDInt(conn))
 	default:
 		log.Printf("[onebot] meta_event %s sub_type=%s", meta.MetaEventType, meta.SubType)
 	}
 }
 
-// onNoticeEvent 处理通知类事件 (戳一戳等), 投递通知管道 (原始 JSON, 业务层自行解析)
+// onNoticeEvent 处理通知类事件 (戳一戳等), 投递通知事件 (原始 JSON, 业务层自行解析)
 func (r *Driver) onNoticeEvent(data []byte, selfID int64) {
-	r.pushNotice(common.UnionEvent{
-		EventType: NotifyEventType,
-		EventData: data,
-		SelfID:    selfID,
-	})
+	r.pushNotice(common.NotifyEvent{
+		Kind:     NotifyEventType,
+		Platform: common.Onebot,
+		Data:     data,
+	}, selfID)
 }
 
 // touchPeer 更新客户端最近心跳时间
@@ -726,20 +717,21 @@ func (r *Driver) touchPeer(selfID string) {
 	r.mu.Unlock()
 }
 
-// push 投递统一消息到接收管道; 管道满时阻塞 (背压), 适配器停止后丢弃
-func (r *Driver) push(msg common.Message) {
+// push 投递统一事件到事件管道; 管道满时阻塞 (背压), 驱动停止后丢弃
+func (r *Driver) push(ev common.Event) {
 	select {
 	case <-r.done:
-	case r.inbound <- msg:
+	case r.events <- ev:
 	}
 }
 
-// pushNotice 投递事件到通知管道; 管道满时阻塞 (背压), 适配器停止后丢弃
-func (r *Driver) pushNotice(ev common.UnionEvent) {
-	select {
-	case <-r.done:
-	case r.notices <- ev:
-	}
+// pushNotice 包装通知事件后投递
+func (r *Driver) pushNotice(notify common.NotifyEvent, selfID int64) {
+	r.push(common.Event{
+		Type:   common.EventNotify,
+		SelfID: fmt.Sprint(selfID),
+		Notify: &notify,
+	})
 }
 
 // connSelfIDInt 查询连接已绑定的 self_id (数值形式), 未绑定返回 0
