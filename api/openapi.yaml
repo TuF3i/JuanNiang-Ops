@@ -1,0 +1,423 @@
+# JuanNiang-Ops HTTP API 接口文档 (OpenAPI 3.1)
+#
+# 对应实现: internal/api/handler (RegisterRoutes)
+# 响应约定: {"status": 20000, "info": "operation success", "data": {...}};
+#           status != 20000 表示业务失败 (HTTP 状态恒 200, 业务码在 status 字段)
+# 鉴权方式: 双 Token —— 登录获取 AccessToken (2h, API 鉴权) + RefreshToken (7d, 换发);
+#           请求头携带 Authorization: Bearer <AccessToken>; Token 存 Redis, 服务重启不失效
+openapi: 3.1.0
+info:
+  title: JuanNiang-Ops API
+  description: |
+    卷娘巡检姬运维平台 HTTP API。
+
+    当前版本包含用户模块（单 admin 用户）与双 Token 会话：
+    - 登录换取 AccessToken + RefreshToken
+    - RefreshToken 换发全新 Token 对（旋转刷新，旧对立即作废防重放）
+    - 登出吊销 Token 对
+    - 查询当前用户信息 / 修改密码
+
+    默认管理员账号为 `admin`（初始密码 `admin123`，首次部署后应立即修改）。
+    Token 存储于 Redis：AccessToken 2h / RefreshToken 7d，服务重启后仍有效（取决于 Redis 持久化）。
+  version: 1.2.0
+
+servers:
+  - url: http://localhost:8082
+    description: 本地开发 (CreateRuntime 默认监听地址, 可经 WithAddr 覆盖)
+
+tags:
+  - name: auth
+    description: 登录与双 Token 会话
+  - name: user
+    description: 用户管理 (需 AccessToken)
+
+paths:
+  /api/v1/login:
+    post:
+      tags: [auth]
+      operationId: login
+      summary: 登录
+      description: |
+        校验用户名与密码, 签发双 Token 对。
+
+        - 用户名不存在与密码错误统一返回 401 "用户名或密码错误"（防用户名枚举）
+        - AccessToken 2h / RefreshToken 7d, 存储 Redis
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            examples:
+              admin:
+                summary: 默认管理员
+                value:
+                  username: admin
+                  password: admin123
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Response'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/LoginData'
+              example:
+                status: 20000
+                info: operation success
+                data:
+                  username: admin
+                  tokens:
+                    access_token: 3f9a2c7e8b1d4f6a0c5e2b8d7a9f1e3c4b6d8f0a2c4e6b8d0f2a4c6e8b1d3f5a
+                    refresh_token: 7d1c3e5a9b7f2d4c6a8e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a
+                    token_type: Bearer
+                    expires_in: 7200
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: 用户名或密码错误 (status=10002)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Response'
+              example:
+                status: 10002
+                info: user not exist or wrong password
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /api/v1/token/refresh:
+    post:
+      tags: [auth]
+      operationId: refreshToken
+      summary: 刷新 Token
+      description: |
+        用 RefreshToken 换发全新的双 Token 对（旋转刷新）。
+
+        - 旧 RefreshToken 立即作废（防重放），旧 AccessToken 等 2h 自然过期
+        - RefreshToken 无效/过期/已使用返回 401
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+            example:
+              refresh_token: 7d1c3e5a9b7f2d4c6a8e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a
+      responses:
+        '200':
+          description: 换发成功 (返回全新 Token 对)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Response'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/TokenPairData'
+              example:
+                status: 20000
+                info: operation success
+                data:
+                  tokens:
+                    access_token: a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90
+                    refresh_token: f0e9d8c7b6a5f4e3d2c1b0a9988776655443322110ffeeddccbbaa9988776655
+                    token_type: Bearer
+                    expires_in: 7200
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: RefreshToken 无效或已使用 (status=10017)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Response'
+              example:
+                status: 10017
+                info: invalid refresh token
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /api/v1/token/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: 登出
+      description: |
+        吊销传入的 Token 对（幂等：无效/已失效的 token 也返回 200）。
+        两类 token 均可只传其一。
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LogoutRequest'
+            example:
+              access_token: 3f9a2c7e8b1d4f6a0c5e2b8d7a9f1e3c4b6d8f0a2c4e6b8d0f2a4c6e8b1d3f5a
+              refresh_token: 7d1c3e5a9b7f2d4c6a8e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a
+      responses:
+        '200':
+          description: 登出成功 (data 为空)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Response'
+              example:
+                status: 20000
+                info: operation success
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /api/v1/user/info:
+    get:
+      tags: [user]
+      operationId: getUserInfo
+      summary: 获取当前用户信息
+      description: 返回当前登录用户的信息; 密码字段不会出现在任何响应中。
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Response'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/UserInfo'
+              example:
+                status: 20000
+                info: operation success
+                data:
+                  username: admin
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /api/v1/user/password:
+    put:
+      tags: [user]
+      operationId: changePassword
+      summary: 修改密码
+      description: |
+        校验旧密码后, 将新密码以 bcrypt 哈希落库。
+
+        - 旧密码错误返回 400 "旧密码错误"
+        - 新密码不能为空 (400)
+        - 修改成功后当前 Token 对仍然有效
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangePasswordRequest'
+            example:
+              old_password: admin123
+              new_password: newpass456
+      responses:
+        '200':
+          description: 修改成功 (data 为空)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Response'
+              example:
+                status: 20000
+                info: operation success
+        '400':
+          description: 参数不完整 / 旧密码错误
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Response'
+              examples:
+                missing:
+                  summary: 参数不完整
+                  value:
+                    status: 70000
+                    info: can't validate data
+                wrongOld:
+                  summary: 旧密码错误
+                  value:
+                    status: 10001
+                    info: wrong old password
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: "AccessToken, 请求头格式: Authorization: Bearer <access_token>"
+
+  responses:
+    BadRequest:
+      description: 请求参数不完整或格式错误
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Response'
+          example:
+            status: 70000
+            info: can't validate data
+    Unauthorized:
+      description: 未登录或 AccessToken 无效/过期
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Response'
+          examples:
+            noToken:
+              summary: 未携带 Token
+              value:
+                status: 10016
+                info: empty token
+            badToken:
+              summary: Token 无效或过期
+              value:
+                status: 10017
+                info: invalid refresh token
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Response'
+          example:
+            status: 10002
+            info: user not exist or wrong password
+    Internal:
+      description: 服务器内部错误
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Response'
+          example:
+            status: 500
+            info: internal error detail
+
+  schemas:
+    Response:
+      type: object
+      description: 统一响应外壳 (业务码模式, HTTP 状态恒 200)
+      required: [status, info]
+      properties:
+        status:
+          type: integer
+          description: 20000 成功; 其余为业务/系统错误码 (见 response 包)
+          examples: [20000]
+        info:
+          type: string
+          description: 提示信息
+          examples: ["operation success"]
+        data:
+          description: 业务数据 (失败时缺省)
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          description: 用户名
+          examples: ["admin"]
+        password:
+          type: string
+          format: password
+          description: 明文密码 (传输层依赖 HTTPS/内网, 服务端只存 bcrypt 哈希)
+          examples: ["admin123"]
+
+    TokenPair:
+      type: object
+      description: 双 Token 对
+      required: [access_token, refresh_token, token_type, expires_in]
+      properties:
+        access_token:
+          type: string
+          description: '访问令牌 (2h), API 鉴权用, 请求头格式: "Authorization: Bearer <access_token>"'
+        refresh_token:
+          type: string
+          description: 刷新令牌 (7d), 用于换发全新 Token 对; 一次性, 使用后立即作废
+        token_type:
+          type: string
+          description: 令牌类型 (固定 Bearer)
+          examples: ["Bearer"]
+        expires_in:
+          type: integer
+          description: AccessToken 有效期 (秒)
+          examples: [7200]
+
+    LoginData:
+      type: object
+      required: [username, tokens]
+      properties:
+        username:
+          type: string
+          description: 登录用户名
+          examples: ["admin"]
+        tokens:
+          $ref: '#/components/schemas/TokenPair'
+
+    TokenPairData:
+      type: object
+      required: [tokens]
+      properties:
+        tokens:
+          $ref: '#/components/schemas/TokenPair'
+
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+          description: 登录时获取的刷新令牌 (一次性)
+
+    LogoutRequest:
+      type: object
+      properties:
+        access_token:
+          type: string
+          description: 待吊销的访问令牌 (可空)
+        refresh_token:
+          type: string
+          description: 待吊销的刷新令牌 (可空)
+
+    UserInfo:
+      type: object
+      required: [username]
+      properties:
+        username:
+          type: string
+          description: 用户名 (不含密码等敏感字段)
+          examples: ["admin"]
+
+    ChangePasswordRequest:
+      type: object
+      required: [old_password, new_password]
+      properties:
+        old_password:
+          type: string
+          format: password
+          description: 旧密码 (用于身份再确认)
+          examples: ["admin123"]
+        new_password:
+          type: string
+          format: password
+          description: 新密码 (非空, 服务端 bcrypt 加密后存储)
+          examples: ["newpass456"]
