@@ -44,14 +44,17 @@ internal/
       feishu/           飞书 WSS 长连接驱动（官方 SDK，含单测）
   agent/                Agent 编排（待实现）
   api/                  HTTP API 模块（gin，依赖注入）
-    runtime.go          CreateRuntime/ReleaseRuntime（Option: WithDB/WithAddr，默认 :8082）
-    handler/            gin 路由与请求处理（统一响应 {"code","msg","data"}）
-    middleware/         gin 中间件（Auth 会话鉴权：Bearer token -> ctx 注入用户名）
-    service/            业务层（bcrypt 密码加密 / 内存 Token 会话 / 登录改密）
+    runtime.go          CreateRuntime/ReleaseRuntime（Option: WithDB/WithRedis/WithAddr，默认 :8082）
+    handler/            gin 路由与请求处理（GenFinalResponse 统一输出，HTTP 恒 200）
+    middleware/         gin 中间件（Auth 会话鉴权：Bearer AccessToken -> ctx 注入用户名）
+    service/            业务层（bcrypt 密码加密 / 双 Token 会话管理 / 登录改密）
+    cache/              Redis Token 存储（AccessToken 2h / RefreshToken 7d，原生 TTL）
+    response/           统一响应与业务错误封装（Response 实现 error，业务错误 var 集合）
     dao/                数据访问（user_table：AutoMigrate + 默认 admin 种子）
     modules/            gorm 模型（User）
   db/                   数据访问（dao / cache，待实现）
   workflow/             工作流（待实现）
+api/                    HTTP API 接口文档（openapi.yaml，与代码包 internal/api 分离）
 infrastructure/         基础设施客户端（postgres / redis / t2i）
 pkg/                    可对外复用的库
 sql/                    数据库迁移脚本（空）
@@ -61,6 +64,8 @@ docs/                   文档（含实施计划）
 ```
 
 约定：每个模块目录下用 `runtime.go` 承载模块级文档/约定；空目录放 `.gitkeep`。
+约定：`openapi.yaml` 接口文档固定放在项目根目录的 `api/` 下（与代码包 `internal/api` 分离），
+**不要**放进 `internal/api/` 包内。
 
 ## 适配器架构（internal/adapter）
 
@@ -153,21 +158,29 @@ OneBot 适配器要点：
 
 用户管理（单 admin 用户）与业务接口的 HTTP 接入层，依赖注入与 adapter 同风格：
 
-- **装配**：`CreateRuntime(WithDB(db), WithAddr(":8082"))` → Dao → Service → Handler → gin 路由
-  → `SetupUser`（AutoMigrate + 默认 admin 种子，`OnConflict DoNothing` 幂等）→ goroutine `ListenAndServe`。
-  db 未注入则自建 infrastructure 默认连接（ownDB，Release 时关闭）。
+- **装配**：`CreateRuntime(WithDB(db), WithRedis(rdb), WithAddr(":8082"))` → Dao + TokenCache(Redis)
+  → Service → Handler → gin 路由 → `SetupUser`（AutoMigrate + 默认 admin 种子，`OnConflict DoNothing`
+  幂等）→ goroutine `ListenAndServe`。db/redis 未注入则自建 infrastructure 默认连接。
   `ReleaseRuntime()` 幂等优雅关停；`Engine()` 暴露 gin 引擎（测试/cmd 挂载）。
 - **分层约束**：handler 只做参数绑定与错误映射；bcrypt 加密、Token 签发/校验在 Service 层；
-  Dao 只管 gorm。密码哈希不出 Service（`GetUserInfo` 返回前脱敏）。
+  Token 持久化在 cache 层（Redis）；Dao 只管 gorm。密码哈希不出 Service（`GetUserInfo` 返回前脱敏）。
 - **密码**：bcrypt（`golang.org/x/crypto`，默认 cost），数据库只存哈希；
   默认管理员 `admin/admin123`（与前端 Mock 提示一致），生产部署后应立即改密。
-- **会话**：内存 Token（32 字节随机 hex → 用户名，24h 滑动续期），服务重启即失效；
-  登录失败统一返回"用户名或密码错误"（防用户名枚举）。后续多实例/持久化时替换为 redis，接口不变。
-- **接口**：`POST /api/v1/login`（公开）、`GET /api/v1/user/info`、`PUT /api/v1/user/password`
-  （后两者走 `middleware.Auth(tokens)` 中间件：`Authorization: Bearer <token>`，失败 401）。
-- **统一响应**：`{"code":0,"msg":"ok","data":{...}}`；可判定错误用包级 sentinel
-  （`ErrInvalidCredential`/`ErrWrongPassword`/`ErrUserNotFound`/`ErrTokenInvalid`），handler 按 `errors.Is` 映射 HTTP 状态码。
-- **测试**：`runtime_test.go` 用 httptest 走完整 DI 链，依赖 `TEST_PG_DSN`（未设置自动 Skip）。
+- **会话（双 Token）**：登录签发 AccessToken（2h，API 鉴权）+ RefreshToken（7d，换发），
+  32 字节随机 hex，存 Redis（原生 TTL，服务重启后仍有效）。RefreshToken 换发走**旋转刷新**
+  （旧 RT 立即作废防重放）；登出同时吊销双 Token。登录失败统一返回"用户名或密码错误"（防枚举）。
+- **接口**：`POST /api/v1/login`、`POST /api/v1/token/refresh`、`POST /api/v1/token/logout`（公开）；
+  `GET /api/v1/user/info`、`PUT /api/v1/user/password`（走 `middleware.Auth(tokens)` 中间件：
+  `Authorization: Bearer <access_token>`，失败 401）。接口文档见 `internal/api/openapi.yaml`（OpenAPI 3.1）。
+- **错误上抛（response 包，参考 CourseSelectionMS 模式）**：`Response` 实现 error 接口，
+  业务错误全部为包级 var 集合（`OperationSuccess`=20000 / `UserNotExiOrWrongPwd`=10002 /
+  `WrongPassword`=10001 / `EmptyToken`·`InvalidToken`=10016 / `InvalidRefresh`=10017 /
+  `RevDataError`=70000 等）；层间方法以 `(data, rsp Response)` 元组返回、错误**原样上抛不包装**，
+  调用方 `errors.Is(rsp, response.OperationSuccess)` 判定成败；handler 统一
+  `GenFinalResponse(rsp, data)` 输出 JSON（HTTP 状态恒 200，业务码在 status 字段；
+  系统错误走 `ServerInternalError(err)`=500 携带详情）。接口文档见根目录 `api/openapi.yaml`。
+- **测试**：`runtime_test.go` 用 httptest 走完整 DI 链，依赖 `TEST_PG_DSN` + `TEST_REDIS_ADDR`
+  （任一未设置自动 Skip）。
 
 ## 编码规范
 

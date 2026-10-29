@@ -1,85 +1,100 @@
-// 登录会话: 内存 Token 管理 (随机 token -> 用户名, TTL 滑动过期).
-//
-// ⚠️ Token 存内存: 服务重启后全部失效 (客户端需重新登录); 如需持久化/多实例,
-// 后续可替换为 cache/ 目录的 redis 实现, 接口签名保持不变.
+// 双 Token 会话管理: AccessToken (短期鉴权) + RefreshToken (长期换发).
+// 存储走 cache 包 (Redis); 生成/校验/换发逻辑在本层. 错误以 response.Response 上抛.
 package service
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"sync"
-	"time"
+
+	"JuanNiang-Ops/internal/api/cache"
+	"JuanNiang-Ops/internal/api/response"
 )
 
-// ErrTokenInvalid token 无效或已过期 (handler 映射 401)
-var ErrTokenInvalid = errors.New("api -> token is invalid or expired")
-
-// 默认会话配置
-const (
-	defaultTokenTTL     = 24 * time.Hour // 有效期, 每次校验成功滑动续期
-	defaultTokenBufSize = 32             // 随机字节数 (hex 后 64 字符)
-)
-
-// session 会话条目
-type session struct {
-	userName  string
-	expiresAt time.Time
-}
-
-// TokenManager 会话管理器 (并发安全)
+// TokenManager 双会话管理器
 type TokenManager struct {
-	mu       sync.RWMutex
-	sessions map[string]session // token -> 会话
-	ttl      time.Duration
+	cache *cache.TokenCache
 }
 
-// NewTokenManager 创建会话管理器
-func NewTokenManager() *TokenManager {
-	return &TokenManager{
-		sessions: make(map[string]session),
-		ttl:      defaultTokenTTL,
+// NewTokenManager 依赖注入: Redis 存储由上层装配
+func NewTokenManager(c *cache.TokenCache) *TokenManager {
+	return &TokenManager{cache: c}
+}
+
+// TokenPair 双 Token 对
+type TokenPair struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	TokenType    string `json:"token_type"` // Bearer
+	ExpiresIn    int64  `json:"expires_in"` // AccessToken 剩余秒数
+}
+
+// IssueToken 签发双 Token 对
+func (r *TokenManager) IssueToken(ctx context.Context, userName string) (*TokenPair, response.Response) {
+	access, err := randomToken()
+	if err != nil {
+		return nil, response.ServerInternalError(err)
+	}
+	refresh, err := randomToken()
+	if err != nil {
+		return nil, response.ServerInternalError(err)
+	}
+
+	if err := r.cache.SaveAccess(ctx, access, userName); err != nil {
+		return nil, response.ServerInternalError(errors.New("save access token: "+err.Error()))
+	}
+	if err := r.cache.SaveRefresh(ctx, refresh, userName); err != nil {
+		return nil, response.ServerInternalError(errors.New("save refresh token: "+err.Error()))
+	}
+
+	return &TokenPair{
+		AccessToken:  access,
+		RefreshToken: refresh,
+		TokenType:    "Bearer",
+		ExpiresIn:    int64(r.cache.AccessTTL().Seconds()),
+	}, response.OperationSuccess
+}
+
+// ValidateAccess 校验 AccessToken, 返回绑定用户名; 无效返回 InvalidToken
+func (r *TokenManager) ValidateAccess(ctx context.Context, token string) (string, response.Response) {
+	userName, err := r.cache.GetAccess(ctx, token)
+	if err != nil {
+		// redis.Nil (不存在/过期) 与其他存储错误统一按 Token 失效处理
+		return "", response.InvalidToken
+	}
+	return userName, response.OperationSuccess
+}
+
+// Refresh 校验 RefreshToken: 旧 RT 立即吊销, 签发全新 Token 对 (旋转刷新, 防重放).
+// RefreshToken 无效返回 InvalidRefresh.
+func (r *TokenManager) Refresh(ctx context.Context, refreshToken string) (*TokenPair, response.Response) {
+	userName, err := r.cache.GetRefresh(ctx, refreshToken)
+	if err != nil {
+		return nil, response.InvalidRefresh
+	}
+
+	// 旋转: 旧 RefreshToken 立即作废 (旧 AT 等自然过期, 最多 2h)
+	_ = r.cache.DeleteRefresh(ctx, refreshToken)
+
+	return r.IssueToken(ctx, userName)
+}
+
+// Revoke 登出: 同时吊销 AT 与 RT (两参数均可为空, 为空跳过)
+func (r *TokenManager) Revoke(ctx context.Context, accessToken, refreshToken string) {
+	if accessToken != "" {
+		_ = r.cache.DeleteAccess(ctx, accessToken)
+	}
+	if refreshToken != "" {
+		_ = r.cache.DeleteRefresh(ctx, refreshToken)
 	}
 }
 
-// IssueToken 签发 token: 32 字节随机数 hex, 绑定用户名
-func (r *TokenManager) IssueToken(userName string) (string, error) {
-	buf := make([]byte, defaultTokenBufSize)
+// randomToken 32 字节随机数 hex (64 字符)
+func randomToken() (string, error) {
+	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {
-		return "", errors.New("api -> generate token failed")
+		return "", errors.New("generate token: " + err.Error())
 	}
-	token := hex.EncodeToString(buf)
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.sessions[token] = session{
-		userName:  userName,
-		expiresAt: time.Now().Add(r.ttl),
-	}
-	return token, nil
-}
-
-// ValidateToken 校验 token 并滑动续期; 返回绑定的用户名
-func (r *TokenManager) ValidateToken(token string) (string, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	s, ok := r.sessions[token]
-	if !ok {
-		return "", ErrTokenInvalid
-	}
-	if time.Now().After(s.expiresAt) {
-		delete(r.sessions, token) // 过期清理
-		return "", ErrTokenInvalid
-	}
-	s.expiresAt = time.Now().Add(r.ttl) // 滑动续期
-	r.sessions[token] = s
-	return s.userName, nil
-}
-
-// RevokeToken 吊销 token (登出)
-func (r *TokenManager) RevokeToken(token string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.sessions, token)
+	return hex.EncodeToString(buf), nil
 }

@@ -1,13 +1,11 @@
+// 用户接口: 登录 / 用户信息 / 修改密码.
 package handler
 
 import (
-	"errors"
-	"net/http"
-
 	"github.com/gin-gonic/gin"
 
 	"JuanNiang-Ops/internal/api/middleware"
-	"JuanNiang-Ops/internal/api/service"
+	"JuanNiang-Ops/internal/api/response"
 )
 
 // loginRequest 登录请求体
@@ -16,26 +14,26 @@ type loginRequest struct {
 	Password string `json:"password" binding:"required"`
 }
 
-// Login POST /api/v1/login: 校验账号密码, 签发 token
+// Login POST /api/v1/login: 校验账号密码, 签发双 Token (AccessToken + RefreshToken)
 func (h *Handler) Login(c *gin.Context) {
 	var req loginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, response{Code: 1, Msg: "参数不完整"})
+		resp(c, response.RevDataError, nil)
 		return
 	}
 
-	user, err := h.service.Login(c.Request.Context(), req.UserName, req.Password)
-	if err != nil {
-		fail(c, err)
+	user, rsp := h.service.Login(c.Request.Context(), req.UserName, req.Password)
+	if !isSuccess(rsp) {
+		resp(c, rsp, nil)
 		return
 	}
 
-	token, err := h.service.Tokens().IssueToken(user.UserName)
-	if err != nil {
-		fail(c, err)
+	pair, rsp := h.service.Tokens().IssueToken(c.Request.Context(), user.UserName)
+	if !isSuccess(rsp) {
+		resp(c, rsp, nil)
 		return
 	}
-	ok(c, gin.H{"token": token, "username": user.UserName})
+	resp(c, response.OperationSuccess, gin.H{"username": user.UserName, "tokens": pair})
 }
 
 // userInfoResponse 用户信息响应 (无密码字段)
@@ -47,12 +45,12 @@ type userInfoResponse struct {
 func (h *Handler) GetUserInfo(c *gin.Context) {
 	userName := c.GetString(middleware.CtxKeyUserName)
 
-	user, err := h.service.GetUserInfo(c.Request.Context(), userName)
-	if err != nil {
-		fail(c, err)
+	user, rsp := h.service.GetUserInfo(c.Request.Context(), userName)
+	if !isSuccess(rsp) {
+		resp(c, rsp, nil)
 		return
 	}
-	ok(c, userInfoResponse{UserName: user.UserName})
+	resp(c, response.OperationSuccess, userInfoResponse{UserName: user.UserName})
 }
 
 // changePasswordRequest 修改密码请求体
@@ -67,17 +65,18 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 
 	var req changePasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, response{Code: 1, Msg: "参数不完整"})
+		resp(c, response.RevDataError, nil)
 		return
 	}
 
-	if err := h.service.ChangePassword(c.Request.Context(), userName, req.OldPassword, req.NewPassword); err != nil {
-		if errors.Is(err, service.ErrWrongPassword) {
-			fail(c, err)
-			return
-		}
-		fail(c, err)
+	if rsp := h.service.ChangePassword(c.Request.Context(), userName, req.OldPassword, req.NewPassword); !isSuccess(rsp) {
+		resp(c, rsp, nil)
 		return
 	}
-	ok(c, nil)
+	respOK(c)
+}
+
+// isSuccess 判定业务响应是否成功
+func isSuccess(rsp response.Response) bool {
+	return rsp.Status == response.OperationSuccess.Status
 }

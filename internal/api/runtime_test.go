@@ -8,18 +8,22 @@ import (
 	"os"
 	"testing"
 
+	"github.com/redis/go-redis/v9"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
+
+	"JuanNiang-Ops/internal/api/response"
 )
 
-// newTestRuntime 连接测试库并创建 API Runtime (httptest 语义, 不占端口).
-// 需要环境变量 TEST_PG_DSN, 未设置则跳过 (数据库不进单测的仓库惯例).
+// newTestRuntime 连接测试库与测试 Redis 并创建 API Runtime (httptest 语义, 不占端口).
+// 需要环境变量 TEST_PG_DSN 与 TEST_REDIS_ADDR, 任一未设置则跳过 (数据库/Redis 不进单测的仓库惯例).
 func newTestRuntime(t *testing.T) *Runtime {
 	t.Helper()
 	dsn := os.Getenv("TEST_PG_DSN")
-	if dsn == "" {
-		t.Skip("TEST_PG_DSN not set, skip db-backed api test")
+	redisAddr := os.Getenv("TEST_REDIS_ADDR")
+	if dsn == "" || redisAddr == "" {
+		t.Skip("TEST_PG_DSN or TEST_REDIS_ADDR not set, skip db-backed api test")
 	}
 
 	db, err := gorm.Open(postgres.New(postgres.Config{DSN: dsn, PreferSimpleProtocol: true}), &gorm.Config{
@@ -28,8 +32,12 @@ func newTestRuntime(t *testing.T) *Runtime {
 	if err != nil {
 		t.Skipf("connect test db: %v", err)
 	}
+	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
+	if err := rdb.Ping(t.Context()).Err(); err != nil {
+		t.Skipf("connect test redis: %v", err)
+	}
 
-	rt, err := CreateRuntime(WithDB(db), WithAddr(":0"))
+	rt, err := CreateRuntime(WithDB(db), WithRedis(rdb), WithAddr(":0"))
 	if err != nil {
 		t.Fatalf("create runtime: %v", err)
 	}
@@ -37,150 +45,198 @@ func newTestRuntime(t *testing.T) *Runtime {
 	return rt
 }
 
-// post 向引擎发起 JSON 请求
-func post(t *testing.T, rt *Runtime, path string, body any) (*http.Response, map[string]any) {
+// do 向引擎发起 JSON 请求并解析统一响应 (FinalResponse: status/info/data)
+func do(t *testing.T, rt *Runtime, method, path, token string, body any) map[string]any {
 	t.Helper()
-	data, err := json.Marshal(body)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
+	var req *http.Request
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		req = httptest.NewRequest(method, path, bytes.NewReader(data))
+		req.Header.Set("Content-Type", "application/json")
+	} else {
+		req = httptest.NewRequest(method, path, nil)
 	}
-	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(data))
-	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
 	w := httptest.NewRecorder()
 	rt.Engine().ServeHTTP(w, req)
 
+	// 业务码模式: HTTP 恒 200, 断言走 status 字段
+	if w.Code != http.StatusOK {
+		t.Fatalf("http status = %d (want 200), body %s", w.Code, w.Body.String())
+	}
 	var result map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("decode response %s: %v", w.Body.String(), err)
 	}
-	return w.Result(), result
+	return result
 }
 
-// login 用指定账号登录并返回 token
-func login(t *testing.T, rt *Runtime, username, password string) string {
+// statusOf 提取响应的业务状态码
+func statusOf(t *testing.T, result map[string]any) uint {
 	t.Helper()
-	resp, result := post(t, rt, "/api/v1/login", map[string]string{
+	f, ok := result["status"].(float64)
+	if !ok {
+		t.Fatalf("missing status field: %v", result)
+	}
+	return uint(f)
+}
+
+// expectStatus 断言业务状态码
+func expectStatus(t *testing.T, result map[string]any, want uint) {
+	t.Helper()
+	if got := statusOf(t, result); got != want {
+		t.Fatalf("status = %d, want %d (body %v)", got, want, result)
+	}
+}
+
+// login 用指定账号登录并返回双 Token
+func login(t *testing.T, rt *Runtime, username, password string) (access, refresh string) {
+	t.Helper()
+	result := do(t, rt, http.MethodPost, "/api/v1/login", "", map[string]string{
 		"username": username,
 		"password": password,
 	})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("login %s: http %d body %v", username, resp.StatusCode, result)
-	}
+	expectStatus(t, result, response.OperationSuccess.Status)
+
 	data, _ := result["data"].(map[string]any)
-	token, _ := data["token"].(string)
-	if token == "" {
-		t.Fatalf("login ok but token empty: %v", result)
+	tokens, _ := data["tokens"].(map[string]any)
+	access, _ = tokens["access_token"].(string)
+	refresh, _ = tokens["refresh_token"].(string)
+	if access == "" || refresh == "" {
+		t.Fatalf("login ok but token pair incomplete: %v", result)
 	}
-	return token
+	return access, refresh
 }
 
 func TestLoginSuccessAndFailure(t *testing.T) {
 	rt := newTestRuntime(t)
 
-	// 正确账号 (默认种子 admin/admin123)
-	token := login(t, rt, "admin", "admin123")
-	if len(token) < 32 {
-		t.Fatalf("token too short: %q", token)
+	// 正确账号 (默认种子 admin/admin123): 返回双 Token
+	access, refresh := login(t, rt, "admin", "admin123")
+	if len(access) < 32 || len(refresh) < 32 {
+		t.Fatalf("token too short: access=%d refresh=%d", len(access), len(refresh))
+	}
+	if access == refresh {
+		t.Fatal("access and refresh token should differ")
 	}
 
-	// 错误密码 -> 401
-	resp, result := post(t, rt, "/api/v1/login", map[string]string{
+	// 错误密码 -> UserNotExiOrWrongPwd
+	result := do(t, rt, http.MethodPost, "/api/v1/login", "", map[string]string{
 		"username": "admin", "password": "wrong",
 	})
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("wrong password: http %d body %v", resp.StatusCode, result)
-	}
+	expectStatus(t, result, response.UserNotExiOrWrongPwd.Status)
 
-	// 不存在的用户 -> 401 (统一错误, 防枚举)
-	resp, _ = post(t, rt, "/api/v1/login", map[string]string{
+	// 不存在的用户 -> 同一错误 (防枚举)
+	result = do(t, rt, http.MethodPost, "/api/v1/login", "", map[string]string{
 		"username": "nobody", "password": "x",
 	})
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("unknown user: http %d", resp.StatusCode)
-	}
+	expectStatus(t, result, response.UserNotExiOrWrongPwd.Status)
 
-	// 缺参数 -> 400
-	resp, _ = post(t, rt, "/api/v1/login", map[string]string{"username": "admin"})
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("missing param: http %d", resp.StatusCode)
-	}
+	// 缺参数 -> RevDataError
+	result = do(t, rt, http.MethodPost, "/api/v1/login", "", map[string]string{"username": "admin"})
+	expectStatus(t, result, response.RevDataError.Status)
 }
 
 func TestAuthMiddleware(t *testing.T) {
 	rt := newTestRuntime(t)
 
-	// 无 token -> 401
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/user/info", nil)
-	w := httptest.NewRecorder()
-	rt.Engine().ServeHTTP(w, req)
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("no token: http %d", w.Code)
+	// 无 token -> EmptyToken
+	result := do(t, rt, http.MethodGet, "/api/v1/user/info", "", nil)
+	expectStatus(t, result, response.EmptyToken.Status)
+
+	// 无效 token -> InvalidToken
+	result = do(t, rt, http.MethodGet, "/api/v1/user/info", "fake-token", nil)
+	expectStatus(t, result, response.InvalidToken.Status)
+
+	// 有效 AccessToken -> 成功且无密码字段泄漏
+	access, _ := login(t, rt, "admin", "admin123")
+	result = do(t, rt, http.MethodGet, "/api/v1/user/info", access, nil)
+	expectStatus(t, result, response.OperationSuccess.Status)
+	if raw, _ := json.Marshal(result); bytes.Contains(raw, []byte(`"password"`)) {
+		t.Fatalf("password leaked in user info: %s", raw)
 	}
 
-	// 无效 token -> 401
-	req = httptest.NewRequest(http.MethodGet, "/api/v1/user/info", nil)
-	req.Header.Set("Authorization", "Bearer fake-token")
-	w = httptest.NewRecorder()
-	rt.Engine().ServeHTTP(w, req)
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("bad token: http %d", w.Code)
+	// RefreshToken 不能当 AccessToken 用 (前缀隔离)
+	_, refresh := login(t, rt, "admin", "admin123")
+	result = do(t, rt, http.MethodGet, "/api/v1/user/info", refresh, nil)
+	expectStatus(t, result, response.InvalidToken.Status)
+}
+
+func TestRefreshFlow(t *testing.T) {
+	rt := newTestRuntime(t)
+	access, refresh := login(t, rt, "admin", "admin123")
+
+	// 旧 access 可用
+	result := do(t, rt, http.MethodGet, "/api/v1/user/info", access, nil)
+	expectStatus(t, result, response.OperationSuccess.Status)
+
+	// 刷新: 换发新对
+	result = do(t, rt, http.MethodPost, "/api/v1/token/refresh", "",
+		map[string]string{"refresh_token": refresh})
+	expectStatus(t, result, response.OperationSuccess.Status)
+	data, _ := result["data"].(map[string]any)
+	tokens, _ := data["tokens"].(map[string]any)
+	newAccess, _ := tokens["access_token"].(string)
+	newRefresh, _ := tokens["refresh_token"].(string)
+	if newAccess == "" || newRefresh == "" || newRefresh == refresh {
+		t.Fatalf("refresh should rotate: %v", tokens)
 	}
 
-	// 有效 token -> 200 且无密码字段泄漏
-	token := login(t, rt, "admin", "admin123")
-	req = httptest.NewRequest(http.MethodGet, "/api/v1/user/info", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	w = httptest.NewRecorder()
-	rt.Engine().ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("valid token: http %d body %s", w.Code, w.Body.String())
-	}
-	if body := w.Body.String(); bytes.Contains([]byte(body), []byte(`"password"`)) {
-		t.Fatalf("password leaked in user info: %s", body)
-	}
+	// 旧 RefreshToken 已作废 (旋转防重放) -> InvalidRefresh
+	result = do(t, rt, http.MethodPost, "/api/v1/token/refresh", "",
+		map[string]string{"refresh_token": refresh})
+	expectStatus(t, result, response.InvalidRefresh.Status)
+
+	// 新 access 可用
+	result = do(t, rt, http.MethodGet, "/api/v1/user/info", newAccess, nil)
+	expectStatus(t, result, response.OperationSuccess.Status)
+}
+
+func TestLogoutFlow(t *testing.T) {
+	rt := newTestRuntime(t)
+	access, refresh := login(t, rt, "admin", "admin123")
+
+	// 登出: 吊销双 Token
+	result := do(t, rt, http.MethodPost, "/api/v1/token/logout", "",
+		map[string]string{"access_token": access, "refresh_token": refresh})
+	expectStatus(t, result, response.OperationSuccess.Status)
+
+	// 双 Token 全部失效
+	result = do(t, rt, http.MethodGet, "/api/v1/user/info", access, nil)
+	expectStatus(t, result, response.InvalidToken.Status)
+	result = do(t, rt, http.MethodPost, "/api/v1/token/refresh", "",
+		map[string]string{"refresh_token": refresh})
+	expectStatus(t, result, response.InvalidRefresh.Status)
 }
 
 func TestChangePasswordFlow(t *testing.T) {
 	rt := newTestRuntime(t)
-	token := login(t, rt, "admin", "admin123")
+	access, _ := login(t, rt, "admin", "admin123")
 
-	// 旧密码错误 -> 400
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/user/password",
-		bytes.NewBufferString(`{"old_password":"bad","new_password":"newpass456"}`))
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	rt.Engine().ServeHTTP(w, req)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("wrong old password: http %d body %s", w.Code, w.Body.String())
-	}
+	// 旧密码错误 -> WrongPassword
+	result := do(t, rt, http.MethodPut, "/api/v1/user/password", access,
+		map[string]string{"old_password": "bad", "new_password": "newpass456"})
+	expectStatus(t, result, response.WrongPassword.Status)
 
-	// 正确修改 -> 200
-	req = httptest.NewRequest(http.MethodPut, "/api/v1/user/password",
-		bytes.NewBufferString(`{"old_password":"admin123","new_password":"newpass456"}`))
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	w = httptest.NewRecorder()
-	rt.Engine().ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("change password: http %d body %s", w.Code, w.Body.String())
-	}
+	// 正确修改 -> 成功
+	result = do(t, rt, http.MethodPut, "/api/v1/user/password", access,
+		map[string]string{"old_password": "admin123", "new_password": "newpass456"})
+	expectStatus(t, result, response.OperationSuccess.Status)
 
 	// 旧密码登录失败, 新密码登录成功
-	resp, _ := post(t, rt, "/api/v1/login", map[string]string{"username": "admin", "password": "admin123"})
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("old password should fail after change: http %d", resp.StatusCode)
-	}
-	_ = login(t, rt, "admin", "newpass456")
+	result = do(t, rt, http.MethodPost, "/api/v1/login", "",
+		map[string]string{"username": "admin", "password": "admin123"})
+	expectStatus(t, result, response.UserNotExiOrWrongPwd.Status)
+	newAccess, _ := login(t, rt, "admin", "newpass456")
 
 	// 还原密码 (避免污染其他用例/环境)
-	req = httptest.NewRequest(http.MethodPut, "/api/v1/user/password",
-		bytes.NewBufferString(`{"old_password":"newpass456","new_password":"admin123"}`))
-	req.Header.Set("Authorization", "Bearer "+login(t, rt, "admin", "newpass456"))
-	req.Header.Set("Content-Type", "application/json")
-	w = httptest.NewRecorder()
-	rt.Engine().ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("restore password: http %d body %s", w.Code, w.Body.String())
-	}
+	result = do(t, rt, http.MethodPut, "/api/v1/user/password", newAccess,
+		map[string]string{"old_password": "newpass456", "new_password": "admin123"})
+	expectStatus(t, result, response.OperationSuccess.Status)
 }

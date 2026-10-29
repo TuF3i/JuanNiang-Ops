@@ -17,11 +17,15 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 
 	"JuanNiang-Ops/infrastructure/postgres"
+	infrastructureRedis "JuanNiang-Ops/infrastructure/redis"
+	"JuanNiang-Ops/internal/api/cache"
 	"JuanNiang-Ops/internal/api/dao"
 	"JuanNiang-Ops/internal/api/handler"
+	"JuanNiang-Ops/internal/api/response"
 	"JuanNiang-Ops/internal/api/service"
 )
 
@@ -36,6 +40,7 @@ type Option func(*options)
 
 type options struct {
 	db   *gorm.DB
+	rdb  *redis.Client
 	addr string
 }
 
@@ -47,6 +52,23 @@ func WithDB(db *gorm.DB) Option {
 // WithAddr 覆盖 HTTP 监听地址 (默认 :8082)
 func WithAddr(addr string) Option {
 	return func(o *options) { o.addr = addr }
+}
+
+// WithRedis 注入已有 Redis 客户端 (不注入则使用 infrastructure 默认连接并自持)
+func WithRedis(rdb *redis.Client) Option {
+	return func(o *options) { o.rdb = rdb }
+}
+
+// newTokenCache 创建 Redis Token 存储: 注入优先, 否则 infrastructure 默认连接
+func newTokenCache(rdb *redis.Client) (*cache.TokenCache, error) {
+	if rdb == nil {
+		var err error
+		rdb, err = infrastructureRedis.NewRedisSentinelClient()
+		if err != nil {
+			return nil, fmt.Errorf("api -> connect redis: %w", err)
+		}
+	}
+	return cache.NewTokenCache(rdb), nil
 }
 
 // Runtime API 模块运行时: 持有装配链与 HTTP Server.
@@ -81,9 +103,13 @@ func CreateRuntime(opts ...Option) (*Runtime, error) {
 		ownDB = true
 	}
 
-	// 依赖注入链: Dao → Service → Handler
+	// 依赖注入链: Dao + TokenCache(Redis) → Service → Handler
 	d := dao.NewDao(db)
-	svc := service.NewService(d)
+	tokenCache, err := newTokenCache(o.rdb)
+	if err != nil {
+		return nil, err
+	}
+	svc := service.NewService(d, tokenCache)
 	h := handler.NewHandler(svc)
 
 	// gin 引擎与路由 (gin 自身不刷调试日志)
@@ -95,8 +121,8 @@ func CreateRuntime(opts ...Option) (*Runtime, error) {
 	// 建表 + 默认管理员种子 (幂等)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := d.SetupUser(ctx); err != nil {
-		return nil, err
+	if rsp := d.SetupUser(ctx); rsp.Status != response.OperationSuccess.Status {
+		return nil, errors.New(rsp.Info)
 	}
 
 	rt := &Runtime{
