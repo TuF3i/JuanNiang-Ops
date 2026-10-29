@@ -21,13 +21,12 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 
-	"JuanNiang-Ops/internal/adapter/common"
-	"JuanNiang-Ops/internal/adapter/config"
+	"JuanNiang-Ops/internal/adapter/modules"
 )
 
 // Driver 飞书平台驱动 (实现 driver.Driver)
 type Driver struct {
-	cfg config.FeishuConfig
+	cfg modules.FeishuConfig
 	// openBaseUrl 飞书 API 基址 (测试可覆盖, 默认 https://open.feishu.cn)
 	openBaseUrl string
 	// wsClient 长连接客户端 (测试可注入 mock)
@@ -37,7 +36,7 @@ type Driver struct {
 	// selfOpenID 机器人自身 open_id (MentionedSelf 判断, 可选注入)
 	selfOpenID string
 
-	events chan common.Event
+	events chan modules.Event
 
 	// apiClient OpenAPI 客户端 (发送), Start 时创建
 	apiClient *lark.Client
@@ -56,7 +55,7 @@ type wsClient interface {
 }
 
 // NewDriver 创建飞书驱动, 调用 Start 后事件管道才会建立
-func NewDriver(cfg config.FeishuConfig) *Driver {
+func NewDriver(cfg modules.FeishuConfig) *Driver {
 	if cfg.EventBuffer <= 0 {
 		cfg.EventBuffer = defaultEventBuffer
 	}
@@ -91,7 +90,7 @@ func (r *Driver) Start() error {
 		return fmt.Errorf("feishu -> driver is running")
 	}
 
-	r.events = make(chan common.Event, r.cfg.EventBuffer)
+	r.events = make(chan modules.Event, r.cfg.EventBuffer)
 	r.done = make(chan struct{})
 	r.running = true
 
@@ -172,13 +171,13 @@ func (r *Driver) Stop() error {
 func (r *Driver) Done() <-chan struct{} { return r.done }
 
 // Events 统一事件管道 (消息 EventMessage / 通知 EventNotify 合流), Start 后可用, Stop 时关闭
-func (r *Driver) Events() <-chan common.Event { return r.events }
+func (r *Driver) Events() <-chan modules.Event { return r.events }
 
 // GetCurrentState 获取驱动当前状态快照
-func (r *Driver) GetCurrentState() *common.RuntimeState {
+func (r *Driver) GetCurrentState() *modules.RuntimeState {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return &common.RuntimeState{IsRunning: r.running}
+	return &modules.RuntimeState{IsRunning: r.running}
 }
 
 // ---------- 事件处理 (SDK 回调) ----------
@@ -249,9 +248,9 @@ func (r *Driver) onMessageReceive(ctx context.Context, event *larkim.P2MessageRe
 		return nil
 	}
 
-	msgType := common.Group
+	msgType := modules.Group
 	if chatType == "p2p" {
-		msgType = common.Private
+		msgType = modules.Private
 	}
 
 	var senderOpenID string
@@ -259,13 +258,13 @@ func (r *Driver) onMessageReceive(ctx context.Context, event *larkim.P2MessageRe
 		senderOpenID = deref(sender.SenderId.OpenId)
 	}
 
-	unified := common.Message{
+	unified := modules.Message{
 		MessageID:   messageID,
-		Platform:    common.Feishu,
+		Platform:    modules.Feishu,
 		MessageType: msgType,
 		ChatID:      chatID,
 		SelfID:      r.selfOpenID, // 注入的机器人身份 (未注入则留空)
-		Sender: common.Sender{
+		Sender: modules.Sender{
 			UID:  senderOpenID,
 			Name: senderOpenID,
 		},
@@ -274,7 +273,7 @@ func (r *Driver) onMessageReceive(ctx context.Context, event *larkim.P2MessageRe
 		Content:       parts,
 		Original:      event.Event,
 	}
-	r.push(common.Event{Type: common.EventMessage, SelfID: unified.SelfID, Message: &unified})
+	r.push(modules.Event{Type: modules.EventMessage, SelfID: unified.SelfID, Message: &unified})
 	return nil
 }
 
@@ -285,18 +284,18 @@ func (r *Driver) pushNotify(kind string, payload any) {
 		log.Printf("[feishu] marshal notify payload: %v", err)
 		return
 	}
-	r.push(common.Event{
-		Type: common.EventNotify,
-		Notify: &common.NotifyEvent{
+	r.push(modules.Event{
+		Type: modules.EventNotify,
+		Notify: &modules.NotifyEvent{
 			Kind:     kind,
-			Platform: common.Feishu,
+			Platform: modules.Feishu,
 			Data:     data,
 		},
 	})
 }
 
 // push 投递统一事件; 管道满时阻塞 (背压), 驱动停止后丢弃
-func (r *Driver) push(ev common.Event) {
+func (r *Driver) push(ev modules.Event) {
 	select {
 	case <-r.done:
 	case r.events <- ev:
@@ -315,17 +314,17 @@ func deref(s *string) string {
 
 // SendGroup 发送群消息: chatID 为飞书 chat_id, selfID 忽略 (长连接单机器人).
 // 等待 OpenAPI 回执, 填充统一 SendReceipt.
-func (r *Driver) SendGroup(ctx context.Context, chatID string, parts []common.MessagePart, selfID string) (*common.SendReceipt, error) {
+func (r *Driver) SendGroup(ctx context.Context, chatID string, parts []modules.MessagePart, selfID string) (*modules.SendReceipt, error) {
 	return r.sendTo(ctx, chatID, larkim.CreateMessageV1ReceiveIDTypeChatId, parts)
 }
 
 // SendPrivate 发送私聊消息: chatID 为对方 open_id.
-func (r *Driver) SendPrivate(ctx context.Context, chatID string, parts []common.MessagePart, selfID string) (*common.SendReceipt, error) {
+func (r *Driver) SendPrivate(ctx context.Context, chatID string, parts []modules.MessagePart, selfID string) (*modules.SendReceipt, error) {
 	return r.sendTo(ctx, chatID, larkim.CreateMessageV1ReceiveIDTypeOpenId, parts)
 }
 
 // sendTo 构造载荷并经 SDK 发送; 带 ReplyPart 时走 reply 接口
-func (r *Driver) sendTo(ctx context.Context, chatID, receiveIDType string, parts []common.MessagePart) (*common.SendReceipt, error) {
+func (r *Driver) sendTo(ctx context.Context, chatID, receiveIDType string, parts []modules.MessagePart) (*modules.SendReceipt, error) {
 	r.mu.RLock()
 	apiClient := r.apiClient
 	r.mu.RUnlock()
@@ -355,7 +354,7 @@ func (r *Driver) sendTo(ctx context.Context, chatID, receiveIDType string, parts
 	if resp == nil || resp.Data == nil || resp.Data.MessageId == nil {
 		return nil, fmt.Errorf("feishu: reply api empty message_id")
 	}
-	return &common.SendReceipt{MessageID: *resp.Data.MessageId, Reply: resp}, nil
+	return &modules.SendReceipt{MessageID: *resp.Data.MessageId, Reply: resp}, nil
 }
 
 	// 常规发送
@@ -375,7 +374,7 @@ func (r *Driver) sendTo(ctx context.Context, chatID, receiveIDType string, parts
 	if resp == nil || resp.Data == nil || resp.Data.MessageId == nil {
 		return nil, fmt.Errorf("feishu: send api empty message_id")
 	}
-	return &common.SendReceipt{MessageID: *resp.Data.MessageId, Reply: resp}, nil
+	return &modules.SendReceipt{MessageID: *resp.Data.MessageId, Reply: resp}, nil
 }
 
 // uuidOf 生成幂等 UUID (飞书 UUID 参数用于去重重试)

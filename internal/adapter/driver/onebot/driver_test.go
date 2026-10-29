@@ -12,8 +12,7 @@ import (
 
 	"github.com/lxzan/gws"
 
-	"JuanNiang-Ops/internal/adapter/common"
-	"JuanNiang-Ops/internal/adapter/config"
+	"JuanNiang-Ops/internal/adapter/modules"
 )
 
 const testTimeout = 5 * time.Second
@@ -99,14 +98,14 @@ func waitPeer(t *testing.T, d *Driver, selfID string) {
 }
 
 // recvEvent 等待一条统一事件
-func recvEvent(t *testing.T, d *Driver) common.Event {
+func recvEvent(t *testing.T, d *Driver) modules.Event {
 	t.Helper()
 	select {
 	case ev := <-d.Events():
 		return ev
 	case <-time.After(testTimeout):
 		t.Fatal("timeout waiting for event")
-		return common.Event{}
+		return modules.Event{}
 	}
 }
 
@@ -123,9 +122,9 @@ func freeAddr(t *testing.T) string {
 }
 
 // newTestDriver 创建已启动的驱动
-func newTestDriver(t *testing.T, mutate func(*config.OneBotConfig)) *Driver {
+func newTestDriver(t *testing.T, mutate func(*modules.OneBotConfig)) *Driver {
 	t.Helper()
-	cfg := config.OneBotConfig{
+	cfg := modules.OneBotConfig{
 		ID:     1,
 		Addr:   freeAddr(t),
 		Enable: true,
@@ -160,7 +159,7 @@ func TestStartStopRestart(t *testing.T) {
 	}
 
 	// 重启后可再次服务
-	d2 := newTestDriver(t, func(c *config.OneBotConfig) {
+	d2 := newTestDriver(t, func(c *modules.OneBotConfig) {
 		c.Addr = d.GetCurrentConfig().Addr
 	})
 	c := newTestClient(t, d2.GetCurrentConfig().Addr)
@@ -186,7 +185,7 @@ func TestMessageEventToCommonEvent(t *testing.T) {
 	})
 
 	ev := recvEvent(t, d)
-	if ev.Type != common.EventMessage {
+	if ev.Type != modules.EventMessage {
 		t.Fatalf("event type = %q", ev.Type)
 	}
 	if ev.SelfID != "10000" {
@@ -196,7 +195,7 @@ func TestMessageEventToCommonEvent(t *testing.T) {
 	if msg == nil {
 		t.Fatal("message is nil")
 	}
-	if msg.Platform != common.Onebot || msg.MessageType != common.Group {
+	if msg.Platform != modules.Onebot || msg.MessageType != modules.Group {
 		t.Errorf("platform/type = %v/%v", msg.Platform, msg.MessageType)
 	}
 	if msg.ChatID != "888" || msg.SelfID != "10000" || msg.MessageID != "42" {
@@ -211,7 +210,7 @@ func TestMessageEventToCommonEvent(t *testing.T) {
 	if len(msg.Content) != 2 {
 		t.Fatalf("content parts = %d, want 2", len(msg.Content))
 	}
-	if _, ok := msg.Content[1].(common.MentionPart); !ok {
+	if _, ok := msg.Content[1].(modules.MentionPart); !ok {
 		t.Errorf("part1 = %#v", msg.Content[1])
 	}
 }
@@ -233,13 +232,13 @@ func TestNoticeEventToCommonEvent(t *testing.T) {
 		TargetID:   10000,
 	})
 	ev := recvEvent(t, d)
-	if ev.Type != common.EventNotify {
+	if ev.Type != modules.EventNotify {
 		t.Fatalf("event type = %q", ev.Type)
 	}
 	if ev.Notify == nil {
 		t.Fatal("notify is nil")
 	}
-	if ev.Notify.Platform != common.Onebot || ev.Notify.Kind != NotifyEventType {
+	if ev.Notify.Platform != modules.Onebot || ev.Notify.Kind != NotifyEventType {
 		t.Errorf("notify = %+v", ev.Notify)
 	}
 	var poke PokeEvent
@@ -259,7 +258,7 @@ func TestCallRoundTripAndRouting(t *testing.T) {
 	waitPeer(t, d, "10000")
 
 	// SendPrivateMsg (chatID string) 下行验证
-	if err := d.SendPrivateMsg("10000", "20001", []common.MessagePart{common.TextPart{Text: "direct"}}); err != nil {
+	if err := d.SendPrivateMsg("10000", "20001", []modules.MessagePart{modules.TextPart{Text: "direct"}}); err != nil {
 		t.Fatalf("send private: %v", err)
 	}
 	if data := c.recvRaw(t); !strings.Contains(string(data), `"user_id":20001`) {
@@ -294,7 +293,7 @@ func TestCallRoundTripAndRouting(t *testing.T) {
 			}
 		}
 	}()
-	if _, err := d.SendGroup(context.Background(), "888", []common.MessagePart{common.TextPart{Text: "x"}}, "10000"); err != nil {
+	if _, err := d.SendGroup(context.Background(), "888", []modules.MessagePart{modules.TextPart{Text: "x"}}, "10000"); err != nil {
 		t.Fatalf("send group: %v", err)
 	}
 }

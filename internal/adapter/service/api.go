@@ -1,76 +1,18 @@
-package adapter
+// 统一对外 API: 驱动开关 / 配置读写 / 状态查询 / 消息发送. 业务层 (agent/api 模块) 唯一入口.
+package service
 
 import (
-	"JuanNiang-Ops/internal/adapter/common"
-	"JuanNiang-Ops/internal/adapter/config"
+	"context"
 	"fmt"
+
+	"JuanNiang-Ops/internal/adapter/modules"
 )
 
-// EnableDriver 启用指定平台驱动 (运行时开关): 落库 enable=true 并启动
-func (r *Runtime) EnableDriver(driverType DriverType) error { // status, error
-	switch driverType {
-	case OnebotDriver:
-		select {
-		case <-r.OnebotDriver.ctx.Done():
-			return fmt.Errorf("enable driver -> driver is shutting down")
-		default:
-			err := r.enableOnebotDriverV11()
-			if err != nil {
-				return fmt.Errorf("enable driver -> %w", err)
-			}
-			return nil
-		}
-	case FeishuDriver:
-		select {
-		case <-r.FeishuDriver.ctx.Done():
-			return fmt.Errorf("enable driver -> driver is shutting down")
-		default:
-			err := r.enableFeishuDriverV11()
-			if err != nil {
-				return fmt.Errorf("enable driver -> %w", err)
-			}
-			return nil
-		}
-	default:
-		return fmt.Errorf("enable driver -> unknown driver type")
-	}
-}
-
-// DisabledDriver 停用指定平台驱动 (运行时开关): 落库 enable=false 并停止
-func (r *Runtime) DisabledDriver(driverType DriverType) error {
-	switch driverType {
-	case OnebotDriver:
-		select {
-		case <-r.OnebotDriver.ctx.Done():
-			return fmt.Errorf("disable driver -> driver is shutting down")
-		default:
-			err := r.disableOnebotDriverV11()
-			if err != nil {
-				return fmt.Errorf("disable driver -> %w", err)
-			}
-			return nil
-		}
-	case FeishuDriver:
-		select {
-		case <-r.FeishuDriver.ctx.Done():
-			return fmt.Errorf("disable driver -> driver is shutting down")
-		default:
-			err := r.disableFeishuDriverV11()
-			if err != nil {
-				return fmt.Errorf("disable driver -> %w", err)
-			}
-			return nil
-		}
-	default:
-		return fmt.Errorf("disable driver -> unknown driver type")
-	}
-}
-
 // UpdateRuntimeConfig 更新运行时配置: MD5 对比无变化直接返回; 有变化落库并重建对应驱动.
-func (r *Runtime) UpdateRuntimeConfig(cfg any) error {
+func (r *Service) UpdateRuntimeConfig(cfg any) error {
 	switch dst := (cfg).(type) {
-	case *config.OneBotConfig:
-		src, err := r.ConfigManager.GetConfig()
+	case *modules.OneBotConfig:
+		src, err := r.dao.GetOneBotConfig(context.Background())
 		if err != nil {
 			return fmt.Errorf("update runtime config -> %w", err)
 		}
@@ -83,18 +25,18 @@ func (r *Runtime) UpdateRuntimeConfig(cfg any) error {
 			return nil
 		}
 
-		if err := r.ConfigManager.UpdateConfig(dst); err != nil {
+		if err := r.dao.UpdateOneBotConfig(context.Background(), dst); err != nil {
 			return fmt.Errorf("update runtime config -> %w", err)
 		}
 		// 配置已变更: 驱动运行中则重建使其生效
-		if r.OnebotDriver != nil && r.OnebotDriver.driver.GetCurrentState().IsRunning {
+		if r.Onebot != nil && r.Onebot.driver.GetCurrentState().IsRunning {
 			if err := r.reCreateOnebotDriverV11(); err != nil {
 				return fmt.Errorf("update runtime config -> %w", err)
 			}
 		}
 		return nil
-	case *config.FeishuConfig:
-		src, err := r.ConfigManager.GetFeishuConfig()
+	case *modules.FeishuConfig:
+		src, err := r.dao.GetFeishuConfig(context.Background())
 		if err != nil {
 			return fmt.Errorf("update runtime config -> %w", err)
 		}
@@ -107,10 +49,10 @@ func (r *Runtime) UpdateRuntimeConfig(cfg any) error {
 			return nil
 		}
 
-		if err := r.ConfigManager.UpdateFeishuConfig(dst); err != nil {
+		if err := r.dao.UpdateFeishuConfig(context.Background(), dst); err != nil {
 			return fmt.Errorf("update runtime config -> %w", err)
 		}
-		if r.FeishuDriver != nil && r.FeishuDriver.driver.GetCurrentState().IsRunning {
+		if r.Feishu != nil && r.Feishu.driver.GetCurrentState().IsRunning {
 			if err := r.reCreateFeishuDriverV11(); err != nil {
 				return fmt.Errorf("update runtime config -> %w", err)
 			}
@@ -122,24 +64,24 @@ func (r *Runtime) UpdateRuntimeConfig(cfg any) error {
 }
 
 // GetAdapterStatus 获取指定平台驱动运行状态
-func (r *Runtime) GetAdapterStatus(driverType DriverType) (*common.RuntimeState, error) {
+func (r *Service) GetAdapterStatus(driverType DriverType) (*modules.RuntimeState, error) {
 	switch driverType {
 	case OnebotDriver:
-		return r.OnebotDriver.driver.GetCurrentState(), nil
+		return r.Onebot.driver.GetCurrentState(), nil
 	case FeishuDriver:
-		return r.FeishuDriver.driver.GetCurrentState(), nil
+		return r.Feishu.driver.GetCurrentState(), nil
 	default:
 		return nil, fmt.Errorf("get adapter status -> unknown driver type")
 	}
 }
 
 // GetAdapterConfig 获取指定平台配置
-func (r *Runtime) GetAdapterConfig(driverType DriverType) (any, error) {
+func (r *Service) GetAdapterConfig(driverType DriverType) (any, error) {
 	switch driverType {
 	case OnebotDriver:
-		return r.ConfigManager.GetConfig()
+		return r.dao.GetOneBotConfig(context.Background())
 	case FeishuDriver:
-		return r.ConfigManager.GetFeishuConfig()
+		return r.dao.GetFeishuConfig(context.Background())
 	default:
 		return nil, fmt.Errorf("get adapter config -> unknown driver type")
 	}
@@ -148,7 +90,7 @@ func (r *Runtime) GetAdapterConfig(driverType DriverType) (any, error) {
 // SendGroupMessage 发送群消息: target 为机器人自身标识 self_id ——
 // 空则走飞书驱动; 非空则精确匹配 OneBot 已接入的机器人, 未接入报错.
 // chatID 为群会话 ID (OneBot 群号 / 飞书 chat_id), 部件为平台无关统一消息.
-func (r *Runtime) SendGroupMessage(target string, chatID string, msg []common.MessagePart) error {
+func (r *Service) SendGroupMessage(target string, chatID string, msg []modules.MessagePart) error {
 	r.mu.Lock()
 	driverType, err := r.route(target)
 	r.mu.Unlock()
@@ -158,27 +100,27 @@ func (r *Runtime) SendGroupMessage(target string, chatID string, msg []common.Me
 
 	switch driverType {
 	case OnebotDriver:
-		if !r.OnebotDriver.driver.GetCurrentState().IsRunning {
+		if !r.Onebot.driver.GetCurrentState().IsRunning {
 			return fmt.Errorf("send group message -> driver is not running")
 		}
 		select {
-		case <-r.OnebotDriver.ctx.Done():
+		case <-r.Onebot.ctx.Done():
 			return fmt.Errorf("send group message -> driver is shutting down")
 		default:
-			if err := r.OnebotDriver.driver.SendGroupMsg(target, chatID, msg); err != nil {
+			if err := r.Onebot.driver.SendGroupMsg(target, chatID, msg); err != nil {
 				return fmt.Errorf("send group message -> %w", err)
 			}
 			return nil
 		}
 	case FeishuDriver:
-		if !r.FeishuDriver.driver.GetCurrentState().IsRunning {
+		if !r.Feishu.driver.GetCurrentState().IsRunning {
 			return fmt.Errorf("send group message -> driver is not running")
 		}
 		select {
-		case <-r.FeishuDriver.ctx.Done():
+		case <-r.Feishu.ctx.Done():
 			return fmt.Errorf("send group message -> driver is shutting down")
 		default:
-			if _, err := r.FeishuDriver.driver.SendGroup(newContext(), chatID, msg, target); err != nil {
+			if _, err := r.Feishu.driver.SendGroup(newContext(), chatID, msg, target); err != nil {
 				return fmt.Errorf("send group message -> %w", err)
 			}
 			return nil
@@ -191,7 +133,7 @@ func (r *Runtime) SendGroupMessage(target string, chatID string, msg []common.Me
 // SendPrivateMessage 发送私聊消息: target 为机器人自身标识 self_id ——
 // 空则走飞书驱动; 非空则精确匹配 OneBot 已接入的机器人, 未接入报错.
 // chatID 为对方用户 ID (OneBot QQ 号 / 飞书 open_id).
-func (r *Runtime) SendPrivateMessage(target string, chatID string, msg []common.MessagePart) error {
+func (r *Service) SendPrivateMessage(target string, chatID string, msg []modules.MessagePart) error {
 	r.mu.Lock()
 	driverType, err := r.route(target)
 	r.mu.Unlock()
@@ -201,27 +143,27 @@ func (r *Runtime) SendPrivateMessage(target string, chatID string, msg []common.
 
 	switch driverType {
 	case OnebotDriver:
-		if !r.OnebotDriver.driver.GetCurrentState().IsRunning {
+		if !r.Onebot.driver.GetCurrentState().IsRunning {
 			return fmt.Errorf("send private message -> driver is not running")
 		}
 		select {
-		case <-r.OnebotDriver.ctx.Done():
+		case <-r.Onebot.ctx.Done():
 			return fmt.Errorf("send private message -> driver is shutting down")
 		default:
-			if err := r.OnebotDriver.driver.SendPrivateMsg(target, chatID, msg); err != nil {
+			if err := r.Onebot.driver.SendPrivateMsg(target, chatID, msg); err != nil {
 				return fmt.Errorf("send private message -> %w", err)
 			}
 			return nil
 		}
 	case FeishuDriver:
-		if !r.FeishuDriver.driver.GetCurrentState().IsRunning {
+		if !r.Feishu.driver.GetCurrentState().IsRunning {
 			return fmt.Errorf("send private message -> driver is not running")
 		}
 		select {
-		case <-r.FeishuDriver.ctx.Done():
+		case <-r.Feishu.ctx.Done():
 			return fmt.Errorf("send private message -> driver is shutting down")
 		default:
-			if _, err := r.FeishuDriver.driver.SendPrivate(newContext(), chatID, msg, target); err != nil {
+			if _, err := r.Feishu.driver.SendPrivate(newContext(), chatID, msg, target); err != nil {
 				return fmt.Errorf("send private message -> %w", err)
 			}
 			return nil
@@ -231,12 +173,12 @@ func (r *Runtime) SendPrivateMessage(target string, chatID string, msg []common.
 	}
 }
 
-// ReplyMessage 回复一条收到的消息: 从 Event 提取会话与机器人身份, 按消息类型选择群/私聊发送.
-func (r *Runtime) ReplyMessage(target string, origin common.Message, msg []common.MessagePart) error {
+// ReplyMessage 回复一条收到的消息: 从 Message 提取会话与机器人身份, 按消息类型选择群/私聊发送.
+func (r *Service) ReplyMessage(target string, origin modules.Message, msg []modules.MessagePart) error {
 	switch origin.MessageType {
-	case common.Group:
+	case modules.Group:
 		return r.SendGroupMessage(target, origin.ChatID, msg)
-	case common.Private:
+	case modules.Private:
 		return r.SendPrivateMessage(target, origin.ChatID, msg)
 	default:
 		return fmt.Errorf("reply message -> unsupported message type %q", origin.MessageType)

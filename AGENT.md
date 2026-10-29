@@ -34,18 +34,21 @@ go mod tidy                                     # 依赖整理
 cmd/                    程序入口（cobra，待实现）
 config/viper/           配置加载（viper，待实现）
 internal/
-  adapter/              平台适配器 ★ 最完整的模块
-    runtime.go          Runtime 生命周期管理器（CreateRuntime/ReleaseRuntime/事件合流管道）
-    handler.go          驱动启停/重建链路 + 发送路由
-    api.go              对业务层的运行时 API（开关/配置/发送）
-    util.go             配置对比（sonic+MD5）
-    config/             平台配置模型与 ConfigManager（onebot_configs / feishu_configs）
-    common/             平台无关统一模型（Event/Message/MessagePart/SendReceipt/RuntimeState）
+  adapter/              平台适配器 ★ 组装层 + 分包业务
+    runtime.go          唯一顶层文件: Runtime 组装/创建/释放 (Option: WithDB)
+    modules/            全部数据模型（message / event / driver / config）
+    dao/                数据库操作（配置表读写，gorm）
+    service/            运行时状态与业务方法（生命周期 / 统一 API / 发送路由 / 驱动包装）
     driver/             Driver 统一接口 + 平台实现
       onebot/           OneBot v11 正向 WS 驱动（含单测）
       feishu/           飞书 WSS 长连接驱动（官方 SDK，含单测）
   agent/                Agent 编排（待实现）
-  api/                  HTTP API（待实现）
+  api/                  HTTP API 模块（gin，依赖注入）
+    runtime.go          CreateRuntime/ReleaseRuntime（Option: WithDB/WithAddr，默认 :8082）
+    handler/            gin 路由与请求处理（统一响应 {"code","msg","data"} + Auth 中间件）
+    service/            业务层（bcrypt 密码加密 / 内存 Token 会话 / 登录改密）
+    dao/                数据访问（user_table：AutoMigrate + 默认 admin 种子）
+    modules/            gorm 模型（User）
   db/                   数据访问（dao / cache，待实现）
   workflow/             工作流（待实现）
 infrastructure/         基础设施客户端（postgres / redis / t2i）
@@ -60,40 +63,43 @@ docs/                   文档（含实施计划）
 
 ## 适配器架构（internal/adapter）
 
-分层（平台无关抽象 ↔ 平台实现）：
+分层（与 internal/api 同构，顶层 runtime 只负责组装）：
 
 ```
 业务层 (agent / workflow / api)
-  │ 消费: rt.Events() <-chan common.Event     发送: rt.SendGroupMessage / SendPrivateMessage / ReplyMessage
+  │ 消费: rt.Service.Events() <-chan modules.Event
+  │ 发送: rt.Service.SendGroupMessage / SendPrivateMessage / ReplyMessage
   ▼
-Runtime (runtime.go)                          ← 统一抽象层: 装配 / 生命周期 / 事件合流 / 发送路由
-  │ driver.Driver 接口 (隐式匹配)
+Runtime (runtime.go)      ← 只负责组装与创建/释放 (db → dao → service → 驱动装配)
   ▼
-onebot.Driver / feishu.Driver                 ← 平台实现层: 协议通信与格式转换
+service.Service           ← 运行时状态持有者: 驱动生命周期 / 配置读写 / 发送路由 / 事件合流管道
+  │ dao (gorm)                driver.Driver 接口 (隐式匹配)
+  ▼                           ▼
+modules (数据模型)        onebot.Driver / feishu.Driver (平台实现层)
 ```
 
-- **统一事件模型（common/event.go）**：`Event{Type, SelfID, Message, Notify}`，
-  `Type=EventMessage` 时 `Message` 非 nil（统一消息），`Type=EventNotify` 时 `Notify` 非 nil
-  （`NotifyEvent{Kind, Platform, Data}`，平台原始 JSON 由业务层自行解析）。
-- **Driver 接口（driver/driver.go）**：`Start/Stop/Done + Events() <-chan common.Event +
-  GetCurrentState`。每个平台驱动的消息与通知**合流为一条事件管道**，Stop 时关闭。
+- **modules/**（全部数据模型，按用途分文件）：`message.go`（Platform/MessageType/Sender/Message/
+  MessagePart 各部件/SendReceipt）、`event.go`（Event{Type, SelfID, Message, Notify}）、
+  `driver.go`（RuntimeState/PeerState）、`config.go`（OneBotConfig/FeishuConfig + 默认值常量）。
+- **dao/**（数据库操作）：`Dao{db}`，`SetupConfig`（AutoMigrate + 幂等种子行）/ 两个平台的
+  Get/UpdateConfig；只做 gorm 操作，业务在 service。
+- **service/**（运行时状态与方法）：
+  - `Service{dao, Onebot, Feishu, events, done, wg, mu}`；`Events()` 合流管道。
+  - `lifecycle.go`：`SetupDrivers`（按配置启动+挂转发泵）、`EnableDriver/DisabledDriver`
+    （落库+Start/Stop）、`reCreateXxx`（Stop 旧 → New → Start → 重挂泵，事件管道不变）、`Release`（幂等）。
+  - `api.go`：`SendGroupMessage/SendPrivateMessage/ReplyMessage`、
+    `UpdateRuntimeConfig`（sonic+MD5 对比 → 落库 → 运行中则重建）、`GetAdapterStatus/GetAdapterConfig`。
+  - `route.go`：发送路由 —— target 为 self_id，空默认飞书；非空精确匹配 OneBot peer，未接入报错。
+  - `wrapper.go`：OnebotDriverV11/FeishuDriverV11 包装（driver 实例+cfg+ctx）+ 转发泵。
 - **Runtime 生命周期（runtime.go）**：
   - `CreateRuntime(opts ...Option)`：建库（可 `WithDB` 注入，否则 infrastructure 默认连接并自持）
-    → `ConfigManager.SetupConfig()`（onebot/feishu 表幂等初始化）→ 启用中的驱动 Start + 挂转发泵
-    （`driver.Events() → rt.events`）。包级 `defaultRuntime` 记录。
-  - `rt.ReleaseRuntime()` / 包级 `ReleaseRuntime()`：幂等；close(done) → 停全部驱动
-    → 转发泵退出 → close(rt.events) 通知业务层 → 自建 db 关闭。
-- **配置变更→重建（handler.go）**：`UpdateRuntimeConfig` 经 `equal`（sonic+MD5）对比 →
-  落库 → 运行中驱动 `reCreateXxx`（Stop 旧 → New → Start → 重挂转发泵，事件管道不变）；
-  `EnableDriver/DisabledDriver` 落库 + Start/Stop（运行时开关）。
-- **发送路由（handler.go `route`）**：target 为机器人自身标识 self_id ——
-  空 target 默认走飞书驱动；非空 target 精确匹配 OneBot 已接入的机器人（peer），未接入报错。
-  `SendGroupMessage/SendPrivateMessage(target, chatID string, parts)`
-  统一 chatID 为 string（OneBot 内部 ParseInt，飞书原生 string）；未知驱动类型返回错误。
+    → `dao.SetupConfig` → `service.NewService` → `SetupDrivers`。包级 `defaultRuntime` 记录。
+  - `rt.ReleaseRuntime()` / 包级 `ReleaseRuntime()`：幂等；停全部驱动 → 转发泵退出
+    → close(events) 通知业务层 → 自建 db 关闭。
 - **平台实现职责**：onebot —— 正向 WS 服务端（NapCat 等接入）、OneBot 事件 ↔ 统一模型双向转换
   （`convertSegments`/`PartsToSegments`）、echo 请求-响应 Call；feishu —— **WebSocket 长连接**
   （官方 SDK `larksuite/oapi-sdk-go`：`larkws` 收事件 / `lark.NewClient` 发 OpenAPI，
-  token 由 SDK 管理，无需公网回调地址，`FeishuConfig` 无 Addr）、
+  token 由 SDK 管理，无需公网回调地址）、
   消息转换（纯文本→text / 纯图→image / 混合→post、ReplyPart 走 reply 接口）。
   测试注入点：`SetWSClient`（mock 长连接）/ `SetOpenBaseUrl` + `SetHTTPClient`（拦截 OpenAPI）。
 
@@ -102,10 +108,10 @@ onebot.Driver / feishu.Driver                 ← 平台实现层: 协议通信�
 | 成员 | 语义 |
 |---|---|
 | `Start() / Stop()` | 生命周期；Start 幂等（重复调用报错），Stop 幂等且阻塞至完全退出 |
-| `Events()` | 统一事件管道 `<-chan common.Event`（消息+通知合流），Stop 时关闭 |
+| `Events()` | 统一事件管道 `<-chan modules.Event`（消息+通知合流），Stop 时关闭 |
 | `Done()` | 停止信号 `<-chan struct{}`，与管道配合消费 |
 
-统一消息模型（`common`）：`Message` 由 `[]MessagePart` 组成（Text/Mention/Image/File/Reply…），
+统一消息模型（`modules`）：`Message` 由 `[]MessagePart` 组成（Text/Mention/Image/File/Reply…），
 适配器负责平台事件 ↔ 统一模型的双向转换，业务层不接触平台原生结构。
 
 OneBot 适配器要点：
@@ -142,24 +148,25 @@ OneBot 适配器要点：
 管道写入一律走 `select { case <-done / case ch <- v }` 模式，
 保证 Stop 关闭通道时不会出现 send-on-closed panic。
 
-## 适配器运行时（AdapterRuntime）
+## API 模块（internal/api）
 
-`AdapterRuntime`（runtime.go）是适配器的生命周期管理器，单条配置（`onebot_configs` 首行）对应单实例：
+用户管理（单 admin 用户）与业务接口的 HTTP 接入层，依赖注入与 adapter 同风格：
 
-- **启动链路**：`NewAdapterRuntime(db)` → `Setup()`（AutoMigrate + 空表插默认行 `:8080`/未启用）
-  → `Start()`（注册配置观察者 + reconcileLoop + 30s 兜底轮询 + 首次 reconcile）。
-- **reconcile**：读配置（无则 FirstOrCreate 默认行）→ 与快照对比（Addr/Token/Admin/Enable/buffers）
-  → 无变化 no-op（幂等）；有变化 Stop 旧实例 → `Enable=false` 保持停止 / `true` 则 New+Start+事件泵。
-  启动失败（如端口占用）只记日志不中断管理器，等下次配置变更再试。
-- **数据库联动（hooks.go）**：`OneBotConfig` 挂 gorm 钩子 `AfterCreate/AfterUpdate/AfterDelete`
-  → 包级 observer（atomic.Value）→ runtime 非阻塞通知（缓冲 1，合并抖动）→ reconcile。
-  ⚠️ **不带主键的批量 Update 不触发 AfterUpdate 钩子**，更新配置必须带主键
-  （`SetEnabled`/`UpdateConfig` 便捷 API 已保证：先 First 再 Save）。
-- **事件泵（handler.go）**：每个适配器实例一个 pump goroutine，消费 Inbound/Notices 并同步调用
-  handler（带 recover）；handler 应快速返回或自行开 goroutine；ctx 为 runtime 根 ctx（Stop 时取消）。
-- **管理 API**：`Setup` / `Start` / `Stop`（幂等，Stop 后可重新 Start）/ `Reload` /
-  `SetEnabled(ctx, bool)`（运行时开关）/ `UpdateConfig(ctx, mutate)` / `GetStatus()` /
-  `OnMessage(h)` / `OnNotice(h)`。
+- **装配**：`CreateRuntime(WithDB(db), WithAddr(":8082"))` → Dao → Service → Handler → gin 路由
+  → `SetupUser`（AutoMigrate + 默认 admin 种子，`OnConflict DoNothing` 幂等）→ goroutine `ListenAndServe`。
+  db 未注入则自建 infrastructure 默认连接（ownDB，Release 时关闭）。
+  `ReleaseRuntime()` 幂等优雅关停；`Engine()` 暴露 gin 引擎（测试/cmd 挂载）。
+- **分层约束**：handler 只做参数绑定与错误映射；bcrypt 加密、Token 签发/校验在 Service 层；
+  Dao 只管 gorm。密码哈希不出 Service（`GetUserInfo` 返回前脱敏）。
+- **密码**：bcrypt（`golang.org/x/crypto`，默认 cost），数据库只存哈希；
+  默认管理员 `admin/admin123`（与前端 Mock 提示一致），生产部署后应立即改密。
+- **会话**：内存 Token（32 字节随机 hex → 用户名，24h 滑动续期），服务重启即失效；
+  登录失败统一返回"用户名或密码错误"（防用户名枚举）。后续多实例/持久化时替换为 redis，接口不变。
+- **接口**：`POST /api/v1/login`（公开）、`GET /api/v1/user/info`、`PUT /api/v1/user/password`
+  （后两者走 `Auth()` 中间件：`Authorization: Bearer <token>`，失败 401）。
+- **统一响应**：`{"code":0,"msg":"ok","data":{...}}`；可判定错误用包级 sentinel
+  （`ErrInvalidCredential`/`ErrWrongPassword`/`ErrUserNotFound`/`ErrTokenInvalid`），handler 按 `errors.Is` 映射 HTTP 状态码。
+- **测试**：`runtime_test.go` 用 httptest 走完整 DI 链，依赖 `TEST_PG_DSN`（未设置自动 Skip）。
 
 ## 编码规范
 

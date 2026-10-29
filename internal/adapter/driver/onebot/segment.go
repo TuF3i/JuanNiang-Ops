@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"JuanNiang-Ops/internal/adapter/common"
+	"JuanNiang-Ops/internal/adapter/modules"
 )
 
 // Segment OneBot 消息段
@@ -83,9 +83,9 @@ type fileData struct {
 }
 
 // convertSegments 将 OneBot 消息段转换为统一消息部件, 并报告是否 @ 了机器人自身
-func convertSegments(segments []Segment, selfID string) ([]common.MessagePart, bool) {
+func convertSegments(segments []Segment, selfID string) ([]modules.MessagePart, bool) {
 	var (
-		parts         []common.MessagePart
+		parts         []modules.MessagePart
 		mentionedSelf bool
 	)
 	for _, seg := range segments {
@@ -93,16 +93,16 @@ func convertSegments(segments []Segment, selfID string) ([]common.MessagePart, b
 		case "text":
 			var d textData
 			if unmarshalSegment(seg.Data, &d) == nil && d.Text != "" {
-				parts = append(parts, common.TextPart{Text: d.Text})
+				parts = append(parts, modules.TextPart{Text: d.Text})
 			}
 		case "at":
 			var d atData
 			if unmarshalSegment(seg.Data, &d) == nil {
 				if d.QQ == "all" {
-					parts = append(parts, common.MentionAllPart{})
+					parts = append(parts, modules.MentionAllPart{})
 					continue
 				}
-				parts = append(parts, common.MentionPart{UserID: d.QQ})
+				parts = append(parts, modules.MentionPart{UserID: d.QQ})
 				if d.QQ == selfID {
 					mentionedSelf = true
 				}
@@ -110,17 +110,17 @@ func convertSegments(segments []Segment, selfID string) ([]common.MessagePart, b
 		case "image":
 			var d imageData
 			if unmarshalSegment(seg.Data, &d) == nil {
-				parts = append(parts, common.ImagePart{FileID: d.File, URL: d.URL})
+				parts = append(parts, modules.ImagePart{FileID: d.File, URL: d.URL})
 			}
 		case "record", "video", "file":
 			var d fileData
 			if unmarshalSegment(seg.Data, &d) == nil {
-				parts = append(parts, common.FilePart{FileID: d.File, Name: d.Name, URL: d.URL, Size: d.FileSize})
+				parts = append(parts, modules.FilePart{FileID: d.File, Name: d.Name, URL: d.URL, Size: d.FileSize})
 			}
 		case "reply":
 			var d replyData
 			if unmarshalSegment(seg.Data, &d) == nil {
-				parts = append(parts, common.ReplyPart{MessageID: d.ID})
+				parts = append(parts, modules.ReplyPart{MessageID: d.ID})
 			}
 		}
 	}
@@ -141,24 +141,24 @@ func unmarshalSegment(data any, target any) error {
 // PartsToSegments 将统一消息部件转换为 OneBot 消息段 (业务层只需构造 common 部件).
 // 支持的部件: TextPart / MentionPart / MentionAllPart / ImagePart / FilePart / ReplyPart;
 // 未知部件返回错误 (不静默丢弃, 避免消息内容意外缺失).
-func PartsToSegments(parts []common.MessagePart) ([]Segment, error) {
+func PartsToSegments(parts []modules.MessagePart) ([]Segment, error) {
 	if len(parts) == 0 {
 		return nil, nil
 	}
 	segments := make([]Segment, 0, len(parts))
 	for i, part := range parts {
 		switch p := part.(type) {
-		case common.TextPart:
+		case modules.TextPart:
 			segments = append(segments, Text(p.Text))
-		case common.MentionPart:
+		case modules.MentionPart:
 			uid, err := strconv.ParseInt(p.UserID, 10, 64)
 			if err != nil {
 				return nil, fmt.Errorf("onebot: part[%d] mention: invalid user_id %q: %w", i, p.UserID, err)
 			}
 			segments = append(segments, At(uid))
-		case common.MentionAllPart:
+		case modules.MentionAllPart:
 			segments = append(segments, AtAll())
-		case common.ImagePart:
+		case modules.ImagePart:
 			// 优先平台文件标识 (file:// 或 http:// 等实现端可识别的形式), 其次远程 URL
 			file := p.FileID
 			if file == "" {
@@ -168,7 +168,7 @@ func PartsToSegments(parts []common.MessagePart) ([]Segment, error) {
 				return nil, fmt.Errorf("onebot: part[%d] image: file_id and url are both empty", i)
 			}
 			segments = append(segments, Image(file))
-		case common.FilePart:
+		case modules.FilePart:
 			data := map[string]any{
 				"file": firstNonEmpty(p.FileID, p.URL),
 				"name": p.Name,
@@ -177,7 +177,7 @@ func PartsToSegments(parts []common.MessagePart) ([]Segment, error) {
 				data["url"] = p.URL
 			}
 			segments = append(segments, Segment{Type: "file", Data: data})
-		case common.ReplyPart:
+		case modules.ReplyPart:
 			segments = append(segments, Reply(p.MessageID))
 		default:
 			return nil, fmt.Errorf("onebot: part[%d] unsupported type %q", i, part.PartType())

@@ -1,8 +1,7 @@
 package onebot
 
 import (
-	"JuanNiang-Ops/internal/adapter/common"
-	"JuanNiang-Ops/internal/adapter/config"
+	"JuanNiang-Ops/internal/adapter/modules"
 	"bufio"
 	"context"
 	"encoding/json"
@@ -21,9 +20,9 @@ import (
 )
 
 type Driver struct {
-	cfg config.OneBotConfig
+	cfg modules.OneBotConfig
 
-	events   chan common.Event
+	events   chan modules.Event
 	outbound chan *Action
 
 	mu    sync.RWMutex
@@ -43,7 +42,7 @@ type Driver struct {
 }
 
 // NewDriver 创建驱动, 调用 Start 后事件管道才会建立
-func NewDriver(cfg config.OneBotConfig) *Driver {
+func NewDriver(cfg modules.OneBotConfig) *Driver {
 	if cfg.MessageBuffer <= 0 {
 		cfg.MessageBuffer = 256
 	}
@@ -77,7 +76,7 @@ func (r *Driver) Start() error {
 		return fmt.Errorf("onebot: listen %s: %w", r.cfg.Addr, err)
 	}
 
-	r.events = make(chan common.Event, r.cfg.MessageBuffer)
+	r.events = make(chan modules.Event, r.cfg.MessageBuffer)
 	r.outbound = make(chan *Action, r.cfg.ActionBuffer)
 	r.done = make(chan struct{})
 	r.listener = listener
@@ -139,7 +138,7 @@ func (r *Driver) Stop() error {
 func (r *Driver) Done() <-chan struct{} { return r.done }
 
 // Events 统一事件管道 (消息 EventMessage / 通知 EventNotify 合流), Start 后可用, Stop 时关闭
-func (r *Driver) Events() <-chan common.Event { return r.events }
+func (r *Driver) Events() <-chan modules.Event { return r.events }
 
 // Outbound 发送指令管道 (业务层 -> OneBot), 只写方向. Start 后可用.
 // 适配器停止后其剩余内容会被排空丢弃; 建议优先使用 Send/Call.
@@ -151,13 +150,13 @@ func (r *Driver) Send(action string, params map[string]any, target string) error
 }
 
 // GetCurrentState 获取适配器当前状态 (含各客户端状态快照)
-func (r *Driver) GetCurrentState() *common.RuntimeState {
+func (r *Driver) GetCurrentState() *modules.RuntimeState {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	peers := make(map[string]common.PeerState, len(r.peers))
+	peers := make(map[string]modules.PeerState, len(r.peers))
 	for selfID, p := range r.peers {
-		peers[selfID] = common.PeerState{
+		peers[selfID] = modules.PeerState{
 			Session:    p.session,
 			SelfID:     p.selfID,
 			RemoteAddr: p.conn.RemoteAddr().String(),
@@ -165,7 +164,7 @@ func (r *Driver) GetCurrentState() *common.RuntimeState {
 		}
 	}
 
-	return &common.RuntimeState{
+	return &modules.RuntimeState{
 		IsRunning: r.running,
 		PeerList:  peers,
 		PeerCount: len(peers),
@@ -173,7 +172,7 @@ func (r *Driver) GetCurrentState() *common.RuntimeState {
 }
 
 // GetCurrentConfig 获取当前配置
-func (r *Driver) GetCurrentConfig() config.OneBotConfig {
+func (r *Driver) GetCurrentConfig() modules.OneBotConfig {
 	return r.cfg
 }
 
@@ -229,7 +228,7 @@ func (r *Driver) Call(ctx context.Context, target, action string, params map[str
 }
 
 // SendGroupMsg 发送群消息: 统一消息部件 -> OneBot 消息段 -> send_group_msg (fire-and-forget)
-func (r *Driver) SendGroupMsg(target string, chatID string, parts []common.MessagePart) error {
+func (r *Driver) SendGroupMsg(target string, chatID string, parts []modules.MessagePart) error {
 	id, err := strconv.ParseInt(chatID, 10, 64)
 	if err != nil {
 		return fmt.Errorf("onebot: invalid group chat_id %q: %w", chatID, err)
@@ -249,7 +248,7 @@ func (r *Driver) SendGroupMsg(target string, chatID string, parts []common.Messa
 }
 
 // SendPrivateMsg 发送私聊消息: 统一消息部件 -> OneBot 消息段 -> send_private_msg (fire-and-forget)
-func (r *Driver) SendPrivateMsg(target string, chatID string, parts []common.MessagePart) error {
+func (r *Driver) SendPrivateMsg(target string, chatID string, parts []modules.MessagePart) error {
 	id, err := strconv.ParseInt(chatID, 10, 64)
 	if err != nil {
 		return fmt.Errorf("onebot: invalid private chat_id %q: %w", chatID, err)
@@ -271,7 +270,7 @@ func (r *Driver) SendPrivateMsg(target string, chatID string, parts []common.Mes
 // ---------- 实现 Driver.MessageSender 接口 (统一发送入口) ----------
 
 // SendGroup 实现 MessageSender: 群消息 (chatID 为群号)
-func (r *Driver) SendGroup(ctx context.Context, chatID string, parts []common.MessagePart, selfID string) (*common.SendReceipt, error) {
+func (r *Driver) SendGroup(ctx context.Context, chatID string, parts []modules.MessagePart, selfID string) (*modules.SendReceipt, error) {
 	id, err := strconv.ParseInt(chatID, 10, 64)
 	if err != nil {
 		return nil, fmt.Errorf("onebot: invalid group chat_id %q: %w", chatID, err)
@@ -287,7 +286,7 @@ func (r *Driver) SendGroup(ctx context.Context, chatID string, parts []common.Me
 }
 
 // SendPrivate 实现 MessageSender: 私聊消息 (chatID 为对方 QQ 号)
-func (r *Driver) SendPrivate(ctx context.Context, chatID string, parts []common.MessagePart, selfID string) (*common.SendReceipt, error) {
+func (r *Driver) SendPrivate(ctx context.Context, chatID string, parts []modules.MessagePart, selfID string) (*modules.SendReceipt, error) {
 	id, err := strconv.ParseInt(chatID, 10, 64)
 	if err != nil {
 		return nil, fmt.Errorf("onebot: invalid private chat_id %q: %w", chatID, err)
@@ -303,7 +302,7 @@ func (r *Driver) SendPrivate(ctx context.Context, chatID string, parts []common.
 }
 
 // mustPartsToSegments 统一部件转 OneBot 段; 转换失败以 error 值形式随结果返回
-func mustPartsToSegments(parts []common.MessagePart) (segments []Segment) {
+func mustPartsToSegments(parts []modules.MessagePart) (segments []Segment) {
 	segments, err := PartsToSegments(parts)
 	if err != nil {
 		return []Segment{{Type: "__invalid__", Data: map[string]any{"error": err.Error()}}}
@@ -312,8 +311,8 @@ func mustPartsToSegments(parts []common.MessagePart) (segments []Segment) {
 }
 
 // receiptOf 从 API 回执提取统一发送回执 (message_id)
-func (r *Driver) receiptOf(result *ApiResult) (*common.SendReceipt, error) {
-	receipt := &common.SendReceipt{Reply: result}
+func (r *Driver) receiptOf(result *ApiResult) (*modules.SendReceipt, error) {
+	receipt := &modules.SendReceipt{Reply: result}
 	if len(result.Data) > 0 {
 		var data struct {
 			MessageID json.Number `json:"message_id"`
@@ -627,10 +626,10 @@ func (r *Driver) onMessageEvent(conn *gws.Conn, data []byte, selfID int64) {
 		return
 	}
 
-	msgType := common.Group
+	msgType := modules.Group
 	chatID := fmt.Sprint(ev.GroupID)
 	if ev.MessageType == "private" {
-		msgType = common.Private
+		msgType = modules.Private
 		chatID = fmt.Sprint(ev.UserID)
 	}
 
@@ -641,13 +640,13 @@ func (r *Driver) onMessageEvent(conn *gws.Conn, data []byte, selfID int64) {
 		name = ev.Sender.Nickname
 	}
 
-	msg := common.Message{
+	msg := modules.Message{
 		MessageID:   fmt.Sprint(ev.MessageID),
-		Platform:    common.Onebot,
+		Platform:    modules.Onebot,
 		MessageType: msgType,
 		ChatID:      chatID,
 		SelfID:      self,
-		Sender: common.Sender{
+		Sender: modules.Sender{
 			UID:     fmt.Sprint(ev.Sender.UserID),
 			Name:    name,
 			IsBot:   ev.Sender.UserID == ev.SelfID,
@@ -658,7 +657,7 @@ func (r *Driver) onMessageEvent(conn *gws.Conn, data []byte, selfID int64) {
 		Content:       content,
 		Original:      json.RawMessage(data),
 	}
-	r.push(common.Event{Type: common.EventMessage, SelfID: self, Message: &msg})
+	r.push(modules.Event{Type: modules.EventMessage, SelfID: self, Message: &msg})
 }
 
 // connSelfID 查询连接已绑定的 self_id, 未绑定返回空串
@@ -689,9 +688,9 @@ func (r *Driver) onMetaEvent(conn *gws.Conn, data []byte) {
 			r.touchPeer(fmt.Sprint(beat.SelfID))
 		}
 	case "lifecycle":
-		r.pushNotice(common.NotifyEvent{
+		r.pushNotice(modules.NotifyEvent{
 			Kind:     MetaEventType,
-			Platform: common.Onebot,
+			Platform: modules.Onebot,
 			Data:     data,
 		}, r.connSelfIDInt(conn))
 	default:
@@ -701,9 +700,9 @@ func (r *Driver) onMetaEvent(conn *gws.Conn, data []byte) {
 
 // onNoticeEvent 处理通知类事件 (戳一戳等), 投递通知事件 (原始 JSON, 业务层自行解析)
 func (r *Driver) onNoticeEvent(data []byte, selfID int64) {
-	r.pushNotice(common.NotifyEvent{
+	r.pushNotice(modules.NotifyEvent{
 		Kind:     NotifyEventType,
-		Platform: common.Onebot,
+		Platform: modules.Onebot,
 		Data:     data,
 	}, selfID)
 }
@@ -718,7 +717,7 @@ func (r *Driver) touchPeer(selfID string) {
 }
 
 // push 投递统一事件到事件管道; 管道满时阻塞 (背压), 驱动停止后丢弃
-func (r *Driver) push(ev common.Event) {
+func (r *Driver) push(ev modules.Event) {
 	select {
 	case <-r.done:
 	case r.events <- ev:
@@ -726,9 +725,9 @@ func (r *Driver) push(ev common.Event) {
 }
 
 // pushNotice 包装通知事件后投递
-func (r *Driver) pushNotice(notify common.NotifyEvent, selfID int64) {
-	r.push(common.Event{
-		Type:   common.EventNotify,
+func (r *Driver) pushNotice(notify modules.NotifyEvent, selfID int64) {
+	r.push(modules.Event{
+		Type:   modules.EventNotify,
 		SelfID: fmt.Sprint(selfID),
 		Notify: &notify,
 	})

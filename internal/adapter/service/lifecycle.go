@@ -1,45 +1,118 @@
-// 配置变更与驱动启停/重建链路: 落库 -> 内存同步 -> 驱动 Start/Stop/重建.
-package adapter
+// 驱动生命周期管理: 启用/停用/重建 (配置落库 -> 内存同步 -> Start/Stop) 与 Service 释放.
+package service
 
 import (
+	"context"
 	"fmt"
 	"log"
 )
 
-// route 消息发送路由: target 为机器人自身标识 self_id.
-//   - target 为空: 默认走飞书驱动 (单机器人长连接, 无路由歧义)
-//   - target 非空: 精确匹配 OneBot 已接入的机器人 (peer), 未接入或断开则报错
-func (r *Runtime) route(target string) (DriverType, error) {
-	if target == "" {
-		if r.FeishuDriver != nil && r.FeishuDriver.driver.GetCurrentState().IsRunning {
-			return FeishuDriver, nil
-		}
-		return "", fmt.Errorf("route -> feishu driver is not running")
+// Release 释放业务层: 停止所有驱动与转发泵, 关闭事件管道 (幂等).
+// 由 runtime.ReleaseRuntime 调用; 事件管道关闭后业务层 range/recv 退出.
+func (r *Service) Release() error {
+	r.mu.Lock()
+	select {
+	case <-r.done:
+		r.mu.Unlock()
+		return nil
+	default:
 	}
+	close(r.done)
 
-	if r.OnebotDriver == nil {
-		return "", fmt.Errorf("route -> onebot driver is not initialized")
+	onebot := r.Onebot
+	feishuD := r.Feishu
+	r.mu.Unlock()
+
+	// 依次: 取消驱动启停 ctx -> 停驱动 (管道关闭使转发泵退出) -> 等泵退出
+	if onebot != nil {
+		onebot.cancel()
+		if err := onebot.driver.Stop(); err != nil {
+			log.Printf("[adapter] stop onebot driver: %v", err)
+		}
 	}
-	st := r.OnebotDriver.driver.GetCurrentState()
-	if _, ok := st.PeerList[target]; ok {
-		return OnebotDriver, nil
+	if feishuD != nil {
+		feishuD.cancel()
+		if err := feishuD.driver.Stop(); err != nil {
+			log.Printf("[adapter] stop feishu driver: %v", err)
+		}
 	}
-	return "", fmt.Errorf("route -> peer %s not found or disconnected", target)
+	r.wg.Wait()
+
+	close(r.events)
+	log.Printf("[adapter] service released")
+	return nil
+}
+
+// EnableDriver 启用指定平台驱动 (运行时开关): 落库 enable=true 并启动
+func (r *Service) EnableDriver(driverType DriverType) error {
+	switch driverType {
+	case OnebotDriver:
+		select {
+		case <-r.Onebot.ctx.Done():
+			return fmt.Errorf("enable driver -> driver is shutting down")
+		default:
+			if err := r.enableOnebotDriverV11(); err != nil {
+				return fmt.Errorf("enable driver -> %w", err)
+			}
+			return nil
+		}
+	case FeishuDriver:
+		select {
+		case <-r.Feishu.ctx.Done():
+			return fmt.Errorf("enable driver -> driver is shutting down")
+		default:
+			if err := r.enableFeishuDriverV11(); err != nil {
+				return fmt.Errorf("enable driver -> %w", err)
+			}
+			return nil
+		}
+	default:
+		return fmt.Errorf("enable driver -> unknown driver type")
+	}
+}
+
+// DisabledDriver 停用指定平台驱动 (运行时开关): 落库 enable=false 并停止
+func (r *Service) DisabledDriver(driverType DriverType) error {
+	switch driverType {
+	case OnebotDriver:
+		select {
+		case <-r.Onebot.ctx.Done():
+			return fmt.Errorf("disable driver -> driver is shutting down")
+		default:
+			if err := r.disableOnebotDriverV11(); err != nil {
+				return fmt.Errorf("disable driver -> %w", err)
+			}
+			return nil
+		}
+	case FeishuDriver:
+		select {
+		case <-r.Feishu.ctx.Done():
+			return fmt.Errorf("disable driver -> driver is shutting down")
+		default:
+			if err := r.disableFeishuDriverV11(); err != nil {
+				return fmt.Errorf("disable driver -> %w", err)
+			}
+			return nil
+		}
+	default:
+		return fmt.Errorf("disable driver -> unknown driver type")
+	}
 }
 
 // reCreateOnebotDriverV11 重建 OneBot 驱动 (配置变更后调用):
 // Stop 旧实例 -> NewDriver(新配置) -> Start -> 重挂转发泵.
-// 事件管道 rt.events 不变, 业务层无感知.
-func (r *Runtime) reCreateOnebotDriverV11() error {
+// 事件管道 svc.events 不变, 业务层无感知.
+func (r *Service) reCreateOnebotDriverV11() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	cfg, err := r.ConfigManager.GetConfig()
+	ctx := context.Background()
+	cfg, err := r.dao.GetOneBotConfig(ctx)
 	if err != nil {
 		return fmt.Errorf("recreate onebot driver v11 -> %w", err)
 	}
 
-	old := r.OnebotDriver
+	old := r.Onebot
 	if old != nil {
 		old.cancel()
 		if err := old.driver.Stop(); err != nil {
@@ -52,7 +125,7 @@ func (r *Runtime) reCreateOnebotDriverV11() error {
 		driver: newOnebotDriver(*cfg),
 	}
 	wrapper.ctx, wrapper.cancel = wrapperCtx()
-	r.OnebotDriver = wrapper
+	r.Onebot = wrapper
 
 	if !cfg.Enable {
 		log.Printf("[adapter] onebot driver disabled (addr=%s)", cfg.Addr)
@@ -69,21 +142,21 @@ func (r *Runtime) reCreateOnebotDriverV11() error {
 }
 
 // enableOnebotDriverV11 启用 OneBot: 落库 enable=true, 未运行则启动
-func (r *Runtime) enableOnebotDriverV11() error {
-	cfg, err := r.ConfigManager.GetConfig()
+func (r *Service) enableOnebotDriverV11() error {
+	cfg, err := r.dao.GetOneBotConfig(context.Background())
 	if err != nil {
 		return fmt.Errorf("enable onebot driver v11 -> %w", err)
 	}
 
 	cfg.Enable = true
-	if err := r.ConfigManager.UpdateConfig(cfg); err != nil {
+	if err := r.dao.UpdateOneBotConfig(context.Background(), cfg); err != nil {
 		return fmt.Errorf("enable onebot driver v11 -> %w", err)
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	wrapper := r.OnebotDriver
+	wrapper := r.Onebot
 	if wrapper == nil {
 		return fmt.Errorf("enable onebot driver v11 -> driver not initialized")
 	}
@@ -100,21 +173,21 @@ func (r *Runtime) enableOnebotDriverV11() error {
 }
 
 // disableOnebotDriverV11 停用 OneBot: 落库 enable=false, 运行中则停止
-func (r *Runtime) disableOnebotDriverV11() error {
-	cfg, err := r.ConfigManager.GetConfig()
+func (r *Service) disableOnebotDriverV11() error {
+	cfg, err := r.dao.GetOneBotConfig(context.Background())
 	if err != nil {
 		return fmt.Errorf("disable onebot driver v11 -> %w", err)
 	}
 
 	cfg.Enable = false
-	if err := r.ConfigManager.UpdateConfig(cfg); err != nil {
+	if err := r.dao.UpdateOneBotConfig(context.Background(), cfg); err != nil {
 		return fmt.Errorf("disable onebot driver v11 -> %w", err)
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	wrapper := r.OnebotDriver
+	wrapper := r.Onebot
 	if wrapper == nil {
 		return fmt.Errorf("disable onebot driver v11 -> driver not initialized")
 	}
@@ -126,19 +199,17 @@ func (r *Runtime) disableOnebotDriverV11() error {
 	return nil
 }
 
-// ---------- 飞书 (与 OneBot 同构) ----------
-
 // reCreateFeishuDriverV11 重建飞书驱动 (配置变更后调用)
-func (r *Runtime) reCreateFeishuDriverV11() error {
+func (r *Service) reCreateFeishuDriverV11() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	cfg, err := r.ConfigManager.GetFeishuConfig()
+	cfg, err := r.dao.GetFeishuConfig(context.Background())
 	if err != nil {
 		return fmt.Errorf("recreate feishu driver v11 -> %w", err)
 	}
 
-	old := r.FeishuDriver
+	old := r.Feishu
 	if old != nil {
 		old.cancel()
 		if err := old.driver.Stop(); err != nil {
@@ -151,7 +222,7 @@ func (r *Runtime) reCreateFeishuDriverV11() error {
 		driver: newFeishuDriver(*cfg),
 	}
 	wrapper.ctx, wrapper.cancel = wrapperCtx()
-	r.FeishuDriver = wrapper
+	r.Feishu = wrapper
 
 	if !cfg.Enable {
 		log.Printf("[adapter] feishu driver disabled (app_id=%s)", cfg.AppID)
@@ -167,21 +238,21 @@ func (r *Runtime) reCreateFeishuDriverV11() error {
 }
 
 // enableFeishuDriverV11 启用飞书: 落库 enable=true, 未运行则启动
-func (r *Runtime) enableFeishuDriverV11() error {
-	cfg, err := r.ConfigManager.GetFeishuConfig()
+func (r *Service) enableFeishuDriverV11() error {
+	cfg, err := r.dao.GetFeishuConfig(context.Background())
 	if err != nil {
 		return fmt.Errorf("enable feishu driver v11 -> %w", err)
 	}
 
 	cfg.Enable = true
-	if err := r.ConfigManager.UpdateFeishuConfig(cfg); err != nil {
+	if err := r.dao.UpdateFeishuConfig(context.Background(), cfg); err != nil {
 		return fmt.Errorf("enable feishu driver v11 -> %w", err)
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	wrapper := r.FeishuDriver
+	wrapper := r.Feishu
 	if wrapper == nil {
 		return fmt.Errorf("enable feishu driver v11 -> driver not initialized")
 	}
@@ -198,21 +269,21 @@ func (r *Runtime) enableFeishuDriverV11() error {
 }
 
 // disableFeishuDriverV11 停用飞书: 落库 enable=false, 运行中则停止
-func (r *Runtime) disableFeishuDriverV11() error {
-	cfg, err := r.ConfigManager.GetFeishuConfig()
+func (r *Service) disableFeishuDriverV11() error {
+	cfg, err := r.dao.GetFeishuConfig(context.Background())
 	if err != nil {
 		return fmt.Errorf("disable feishu driver v11 -> %w", err)
 	}
 
 	cfg.Enable = false
-	if err := r.ConfigManager.UpdateFeishuConfig(cfg); err != nil {
+	if err := r.dao.UpdateFeishuConfig(context.Background(), cfg); err != nil {
 		return fmt.Errorf("disable feishu driver v11 -> %w", err)
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	wrapper := r.FeishuDriver
+	wrapper := r.Feishu
 	if wrapper == nil {
 		return fmt.Errorf("disable feishu driver v11 -> driver not initialized")
 	}

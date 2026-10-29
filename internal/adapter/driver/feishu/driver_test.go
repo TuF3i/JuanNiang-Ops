@@ -14,8 +14,7 @@ import (
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 
-	"JuanNiang-Ops/internal/adapter/common"
-	"JuanNiang-Ops/internal/adapter/config"
+	"JuanNiang-Ops/internal/adapter/modules"
 )
 
 // ---------- 测试辅助 ----------
@@ -70,7 +69,7 @@ func newAPIStub(t *testing.T) *apiStub {
 }
 
 // newTestDriver 创建长连接模式的测试驱动 (mock ws + httptest API)
-func newTestDriver(t *testing.T, cfg config.FeishuConfig) (*Driver, *mockWSClient, *apiStub) {
+func newTestDriver(t *testing.T, cfg modules.FeishuConfig) (*Driver, *mockWSClient, *apiStub) {
 	t.Helper()
 	if cfg.EventBuffer <= 0 {
 		cfg.EventBuffer = 16
@@ -132,14 +131,14 @@ func makeJSONResponse(body string) *http.Response {
 }
 
 // recvEvent 等待一条事件
-func recvEvent(t *testing.T, d *Driver) common.Event {
+func recvEvent(t *testing.T, d *Driver) modules.Event {
 	t.Helper()
 	select {
 	case ev := <-d.Events():
 		return ev
 	case <-time.After(5 * time.Second):
 		t.Fatal("timeout waiting for event")
-		return common.Event{}
+		return modules.Event{}
 	}
 }
 
@@ -147,7 +146,7 @@ func recvEvent(t *testing.T, d *Driver) common.Event {
 
 // TestMessageEventConvert 消息事件 (text + mention) → Event{Message}
 func TestMessageEventConvert(t *testing.T) {
-	d, _, _ := newTestDriver(t, config.FeishuConfig{Enable: true})
+	d, _, _ := newTestDriver(t, modules.FeishuConfig{Enable: true})
 
 	content := `{"text":"@_user_1 你好"}`
 	event := buildMessageEvent("om_1", "oc_group1", "group", "text", content, "1700000000000",
@@ -161,14 +160,14 @@ func TestMessageEventConvert(t *testing.T) {
 	}
 
 	ev := recvEvent(t, d)
-	if ev.Type != common.EventMessage {
+	if ev.Type != modules.EventMessage {
 		t.Fatalf("event type = %q", ev.Type)
 	}
 	msg := ev.Message
 	if msg == nil {
 		t.Fatal("message is nil")
 	}
-	if msg.Platform != common.Feishu || msg.MessageType != common.Group {
+	if msg.Platform != modules.Feishu || msg.MessageType != modules.Group {
 		t.Errorf("platform/type = %v/%v", msg.Platform, msg.MessageType)
 	}
 	if msg.ChatID != "oc_group1" || msg.MessageID != "om_1" {
@@ -183,17 +182,17 @@ func TestMessageEventConvert(t *testing.T) {
 	if len(msg.Content) != 2 {
 		t.Fatalf("content parts = %d, want 2 (mention + text)", len(msg.Content))
 	}
-	if p, ok := msg.Content[0].(common.MentionPart); !ok || p.UserID != "ou_self" {
+	if p, ok := msg.Content[0].(modules.MentionPart); !ok || p.UserID != "ou_self" {
 		t.Errorf("part0 = %#v", msg.Content[0])
 	}
-	if p, ok := msg.Content[1].(common.TextPart); !ok || p.Text != " 你好" {
+	if p, ok := msg.Content[1].(modules.TextPart); !ok || p.Text != " 你好" {
 		t.Errorf("part1 = %#v", msg.Content[1])
 	}
 }
 
 // TestAppMessageSkipped 机器人自己的消息跳过 (防自循环)
 func TestAppMessageSkipped(t *testing.T) {
-	d, _, _ := newTestDriver(t, config.FeishuConfig{Enable: true})
+	d, _, _ := newTestDriver(t, modules.FeishuConfig{Enable: true})
 
 	event := buildMessageEvent("om_1", "oc_chat", "p2p", "text", `{"text":"hi"}`, "1700000000000", nil)
 	event.Event.Sender.SenderType = ptr("app")
@@ -210,7 +209,7 @@ func TestAppMessageSkipped(t *testing.T) {
 
 // TestUnknownMessageTypeToNotify 未支持消息类型 → EventNotify
 func TestUnknownMessageTypeToNotify(t *testing.T) {
-	d, _, _ := newTestDriver(t, config.FeishuConfig{Enable: true})
+	d, _, _ := newTestDriver(t, modules.FeishuConfig{Enable: true})
 
 	event := buildMessageEvent("om_2", "oc_chat", "p2p", "audio", `{"file_key":"k"}`, "1700000000000", nil)
 	if err := d.onMessageReceive(context.Background(), event); err != nil {
@@ -218,10 +217,10 @@ func TestUnknownMessageTypeToNotify(t *testing.T) {
 	}
 
 	ev := recvEvent(t, d)
-	if ev.Type != common.EventNotify {
+	if ev.Type != modules.EventNotify {
 		t.Fatalf("event type = %q, want notify", ev.Type)
 	}
-	if ev.Notify == nil || ev.Notify.Platform != common.Feishu {
+	if ev.Notify == nil || ev.Notify.Platform != modules.Feishu {
 		t.Fatalf("notify = %+v", ev.Notify)
 	}
 	if !strings.Contains(ev.Notify.Kind, "audio") {
@@ -231,13 +230,13 @@ func TestUnknownMessageTypeToNotify(t *testing.T) {
 
 // TestSendMessage 发送: 无回复 → messages 接口 (chat_id), 带回复 → reply 接口
 func TestSendMessage(t *testing.T) {
-	d, _, stub := newTestDriver(t, config.FeishuConfig{Enable: true})
+	d, _, stub := newTestDriver(t, modules.FeishuConfig{Enable: true})
 
 	// 带回复引用 -> reply 接口
-	receipt, err := d.SendGroup(context.Background(), "oc_group1", []common.MessagePart{
-		common.ReplyPart{MessageID: "om_reply_target"},
-		common.TextPart{Text: "hi "},
-		common.MentionPart{UserID: "ou_x"},
+	receipt, err := d.SendGroup(context.Background(), "oc_group1", []modules.MessagePart{
+		modules.ReplyPart{MessageID: "om_reply_target"},
+		modules.TextPart{Text: "hi "},
+		modules.MentionPart{UserID: "ou_x"},
 	}, "")
 	if err != nil {
 		t.Fatalf("send group: %v", err)
@@ -253,7 +252,7 @@ func TestSendMessage(t *testing.T) {
 	}
 
 	// 无回复 -> messages 接口, receive_id_type=chat_id
-	receipt, err = d.SendGroup(context.Background(), "oc_group1", []common.MessagePart{common.TextPart{Text: "direct"}}, "")
+	receipt, err = d.SendGroup(context.Background(), "oc_group1", []modules.MessagePart{modules.TextPart{Text: "direct"}}, "")
 	if err != nil {
 		t.Fatalf("send group direct: %v", err)
 	}
@@ -268,7 +267,7 @@ func TestSendMessage(t *testing.T) {
 	}
 
 	// 私聊: receive_id_type=open_id
-	if _, err := d.SendPrivate(context.Background(), "ou_friend", []common.MessagePart{common.TextPart{Text: "p"}}, ""); err != nil {
+	if _, err := d.SendPrivate(context.Background(), "ou_friend", []modules.MessagePart{modules.TextPart{Text: "p"}}, ""); err != nil {
 		t.Fatalf("send private: %v", err)
 	}
 	if path := stub.path.Load().(string); !strings.Contains(path, "receive_id_type=open_id") {
@@ -278,7 +277,7 @@ func TestSendMessage(t *testing.T) {
 
 // TestNotRunningSendNotStart 未 Start 时发送报错
 func TestNotRunningSendNotStart(t *testing.T) {
-	d := NewDriver(config.FeishuConfig{Enable: true})
+	d := NewDriver(modules.FeishuConfig{Enable: true})
 	if _, err := d.SendGroup(context.Background(), "oc", nil, ""); err == nil {
 		t.Error("send before start should fail")
 	}

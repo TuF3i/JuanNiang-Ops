@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"JuanNiang-Ops/internal/adapter/common"
+	"JuanNiang-Ops/internal/adapter/modules"
 )
 
 // ---------- 接收侧: 飞书 content -> 统一消息部件 ----------
@@ -44,7 +44,7 @@ type fileContent struct {
 // convertContent 将飞书消息 content (JSON 字符串) 转换为统一消息部件.
 // 飞书按 message_type 决定 content 结构, 此处逐类型解析.
 // 返回 (parts, mentionedSelf, error).
-func convertContent(messageType, content string, mentions []Mention, selfOpenID string) ([]common.MessagePart, bool, error) {
+func convertContent(messageType, content string, mentions []Mention, selfOpenID string) ([]modules.MessagePart, bool, error) {
 	switch messageType {
 	case "text":
 		var d textContent
@@ -67,14 +67,14 @@ func convertContent(messageType, content string, mentions []Mention, selfOpenID 
 		if err := json.Unmarshal([]byte(content), &d); err != nil {
 			return nil, false, fmt.Errorf("feishu: parse image content: %w", err)
 		}
-		return []common.MessagePart{common.ImagePart{FileID: d.ImageKey}}, false, nil
+		return []modules.MessagePart{modules.ImagePart{FileID: d.ImageKey}}, false, nil
 
 	case "file":
 		var d fileContent
 		if err := json.Unmarshal([]byte(content), &d); err != nil {
 			return nil, false, fmt.Errorf("feishu: parse file content: %w", err)
 		}
-		return []common.MessagePart{common.FilePart{FileID: d.FileKey, Name: d.FileName}}, false, nil
+		return []modules.MessagePart{modules.FilePart{FileID: d.FileKey, Name: d.FileName}}, false, nil
 
 	default:
 		// 未知类型透传为通知事件由上层处理, 这里返回空部件
@@ -84,13 +84,13 @@ func convertContent(messageType, content string, mentions []Mention, selfOpenID 
 
 // convertTextWithMentions 解析 text 消息: @ 占位符 (@_user_1) 替换为 MentionPart.
 // 飞书 text 中 @ 以 "@_user_1" 形式出现在文本里, 对应 mentions 数组中的 Key.
-func convertTextWithMentions(text string, mentions []Mention, selfOpenID string) []common.MessagePart {
+func convertTextWithMentions(text string, mentions []Mention, selfOpenID string) []modules.MessagePart {
 	if len(mentions) == 0 {
-		return []common.MessagePart{common.TextPart{Text: text}}
+		return []modules.MessagePart{modules.TextPart{Text: text}}
 	}
 
 	var (
-		parts     []common.MessagePart
+		parts     []modules.MessagePart
 		remaining = text
 	)
 	for _, m := range mentions {
@@ -99,13 +99,13 @@ func convertTextWithMentions(text string, mentions []Mention, selfOpenID string)
 			continue
 		}
 		if idx > 0 {
-			parts = append(parts, common.TextPart{Text: remaining[:idx]})
+			parts = append(parts, modules.TextPart{Text: remaining[:idx]})
 		}
-		parts = append(parts, common.MentionPart{UserID: m.ID, UserName: m.Name})
+		parts = append(parts, modules.MentionPart{UserID: m.ID, UserName: m.Name})
 		remaining = remaining[idx+len(m.Key):]
 	}
 	if remaining != "" {
-		parts = append(parts, common.TextPart{Text: remaining})
+		parts = append(parts, modules.TextPart{Text: remaining})
 	}
 	return parts
 }
@@ -121,9 +121,9 @@ func mentionedSelfInText(text string, mentions []Mention, selfOpenID string) boo
 }
 
 // convertPost 富文本消息: 按段落展开为部件序列
-func convertPost(d *postContent, selfOpenID string) ([]common.MessagePart, bool) {
+func convertPost(d *postContent, selfOpenID string) ([]modules.MessagePart, bool) {
 	var (
-		parts         []common.MessagePart
+		parts         []modules.MessagePart
 		mentionedSelf bool
 	)
 	for _, paragraph := range d.Content {
@@ -131,22 +131,22 @@ func convertPost(d *postContent, selfOpenID string) ([]common.MessagePart, bool)
 			switch node.Tag {
 			case "text":
 				if node.Text != "" {
-					parts = append(parts, common.TextPart{Text: node.Text})
+					parts = append(parts, modules.TextPart{Text: node.Text})
 				}
 			case "a":
 				text := node.Text
 				if text == "" {
 					text = node.Href
 				}
-				parts = append(parts, common.TextPart{Text: text + " (" + node.Href + ")"})
+				parts = append(parts, modules.TextPart{Text: text + " (" + node.Href + ")"})
 			case "at":
-				parts = append(parts, common.MentionPart{UserID: node.UserID, UserName: node.UserName})
+				parts = append(parts, modules.MentionPart{UserID: node.UserID, UserName: node.UserName})
 				if node.UserID != "" && node.UserID == selfOpenID {
 					mentionedSelf = true
 				}
 			case "img":
 				if node.ImageKey != "" {
-					parts = append(parts, common.ImagePart{FileID: node.ImageKey})
+					parts = append(parts, modules.ImagePart{FileID: node.ImageKey})
 				}
 			}
 		}
@@ -159,16 +159,16 @@ func convertPost(d *postContent, selfOpenID string) ([]common.MessagePart, bool)
 // buildOutgoing 将统一部件构造为飞书发送载荷 (msg_type + content JSON 字符串).
 // 策略: 单一类型走最小协议 (text/image), 混合内容走 post 富文本.
 // 返回 (msgType, content, replyMessageID, error); replyMessageID 非空时走 reply 接口.
-func buildOutgoing(parts []common.MessagePart) (string, string, string, error) {
+func buildOutgoing(parts []modules.MessagePart) (string, string, string, error) {
 	var replyID string
 	if len(parts) == 0 {
 		return "", "", "", fmt.Errorf("feishu: empty message parts")
 	}
 
 	// 提取回复引用 (飞书回复是独立接口, 不作为消息内容)
-	filtered := make([]common.MessagePart, 0, len(parts))
+	filtered := make([]modules.MessagePart, 0, len(parts))
 	for _, p := range parts {
-		if rp, ok := p.(common.ReplyPart); ok {
+		if rp, ok := p.(modules.ReplyPart); ok {
 			replyID = rp.MessageID
 			continue
 		}
@@ -183,11 +183,11 @@ func buildOutgoing(parts []common.MessagePart) (string, string, string, error) {
 		var b strings.Builder
 		for _, p := range filtered {
 			switch v := p.(type) {
-			case common.TextPart:
+			case modules.TextPart:
 				b.WriteString(v.Text)
-			case common.MentionPart:
+			case modules.MentionPart:
 				b.WriteString(`<at user_id="` + v.UserID + `"></at>`)
-			case common.MentionAllPart:
+			case modules.MentionAllPart:
 				b.WriteString(`<at user_id="all"></at>`)
 			}
 		}
@@ -200,7 +200,7 @@ func buildOutgoing(parts []common.MessagePart) (string, string, string, error) {
 
 	// 单一 image 部件 -> image 消息
 	if len(filtered) == 1 {
-		if img, ok := filtered[0].(common.ImagePart); ok {
+		if img, ok := filtered[0].(modules.ImagePart); ok {
 			content, err := json.Marshal(map[string]string{"image_key": img.FileID})
 			if err != nil {
 				return "", "", "", err
@@ -214,13 +214,13 @@ func buildOutgoing(parts []common.MessagePart) (string, string, string, error) {
 	line := &post.Content[0]
 	for _, p := range filtered {
 		switch v := p.(type) {
-		case common.TextPart:
+		case modules.TextPart:
 			*line = append(*line, postNode{Tag: "text", Text: v.Text})
-		case common.MentionPart:
+		case modules.MentionPart:
 			*line = append(*line, postNode{Tag: "at", UserID: v.UserID})
-		case common.MentionAllPart:
+		case modules.MentionAllPart:
 			*line = append(*line, postNode{Tag: "at", UserName: "所有人"})
-		case common.ImagePart:
+		case modules.ImagePart:
 			*line = append(*line, postNode{Tag: "img", ImageKey: v.FileID})
 		default:
 			return "", "", "", fmt.Errorf("feishu: unsupported part %T in post", p)
@@ -234,10 +234,10 @@ func buildOutgoing(parts []common.MessagePart) (string, string, string, error) {
 }
 
 // isAllText 判断部件是否全部为纯文本 (Mention 属于文本标签, 走 text 协议的 @ 语法)
-func isAllText(parts []common.MessagePart) bool {
+func isAllText(parts []modules.MessagePart) bool {
 	for _, p := range parts {
 		switch p.(type) {
-		case common.TextPart, common.MentionPart, common.MentionAllPart:
+		case modules.TextPart, modules.MentionPart, modules.MentionAllPart:
 			continue
 		default:
 			return false

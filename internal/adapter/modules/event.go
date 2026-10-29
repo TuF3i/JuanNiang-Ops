@@ -1,4 +1,4 @@
-package common
+package modules
 
 // EventType 事件类型标识
 type EventType string
