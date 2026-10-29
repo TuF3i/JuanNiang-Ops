@@ -6,6 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"JuanNiang-Ops/internal/api/middleware"
 	"JuanNiang-Ops/internal/api/service"
 )
 
@@ -44,7 +45,7 @@ type userInfoResponse struct {
 
 // GetUserInfo GET /api/v1/user/info: 当前登录用户信息
 func (h *Handler) GetUserInfo(c *gin.Context) {
-	userName := c.GetString(ctxKeyUserName)
+	userName := c.GetString(middleware.CtxKeyUserName)
 
 	user, err := h.service.GetUserInfo(c.Request.Context(), userName)
 	if err != nil {
@@ -62,7 +63,7 @@ type changePasswordRequest struct {
 
 // ChangePassword PUT /api/v1/user/password: 校验旧密码后更新
 func (h *Handler) ChangePassword(c *gin.Context) {
-	userName := c.GetString(ctxKeyUserName)
+	userName := c.GetString(middleware.CtxKeyUserName)
 
 	var req changePasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {

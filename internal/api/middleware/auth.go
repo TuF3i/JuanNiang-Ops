@@ -1,4 +1,6 @@
-package handler
+// Package middleware gin 中间件: 会话鉴权等横切关注点.
+// 中间件只做校验与上下文注入, 业务校验依赖 service.TokenManager.
+package middleware
 
 import (
 	"errors"
@@ -10,34 +12,34 @@ import (
 	"JuanNiang-Ops/internal/api/service"
 )
 
-// ctxKeyUserName gin context 中用户名的键
-const ctxKeyUserName = "api.userName"
+// CtxKeyUserName gin context 中用户名的键 (handler 经 c.GetString 取值)
+const CtxKeyUserName = "api.userName"
 
 // bearerPrefix Authorization 头前缀
 const bearerPrefix = "Bearer "
 
 // Auth 会话鉴权中间件: 校验 Authorization: Bearer <token>, 用户名注入 context.
 // 失败统一 401 (不再继续路由).
-func (h *Handler) Auth() gin.HandlerFunc {
+func Auth(tokens *service.TokenManager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		auth := c.GetHeader("Authorization")
 		token, found := strings.CutPrefix(auth, bearerPrefix)
 		if !found || token == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, response{Code: 1, Msg: "未登录"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 1, "msg": "未登录"})
 			return
 		}
 
-		userName, err := h.service.Tokens().ValidateToken(token)
+		userName, err := tokens.ValidateToken(token)
 		if err != nil {
 			if !errors.Is(err, service.ErrTokenInvalid) {
 				// 非 token 类错误按未登录处理并记日志
-				c.Error(err) // nolint: errcheck
+				_ = c.Error(err)
 			}
-			c.AbortWithStatusJSON(http.StatusUnauthorized, response{Code: 1, Msg: "登录已失效, 请重新登录"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 1, "msg": "登录已失效, 请重新登录"})
 			return
 		}
 
-		c.Set(ctxKeyUserName, userName)
+		c.Set(CtxKeyUserName, userName)
 		c.Next()
 	}
 }

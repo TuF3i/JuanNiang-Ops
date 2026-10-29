@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"JuanNiang-Ops/internal/api/dao"
+	"JuanNiang-Ops/internal/api/middleware"
 	"JuanNiang-Ops/internal/api/service"
 )
 
@@ -21,12 +22,12 @@ func NewHandler(svc *service.Service) *Handler {
 	return &Handler{service: svc}
 }
 
-// RegisterRoutes 注册路由: login 公开, /user 组挂 Auth 中间件.
+// RegisterRoutes 注册路由: login 公开, /user 组挂 Auth 中间件 (middleware 包).
 func (h *Handler) RegisterRoutes(rg gin.IRouter) {
 	v1 := rg.Group("/api/v1")
 	v1.POST("/login", h.Login)
 
-	user := v1.Group("/user", h.Auth())
+	user := v1.Group("/user", middleware.Auth(h.service.Tokens()))
 	user.GET("/info", h.GetUserInfo)
 	user.PUT("/password", h.ChangePassword)
 }

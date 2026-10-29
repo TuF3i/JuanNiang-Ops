@@ -45,7 +45,8 @@ internal/
   agent/                Agent 编排（待实现）
   api/                  HTTP API 模块（gin，依赖注入）
     runtime.go          CreateRuntime/ReleaseRuntime（Option: WithDB/WithAddr，默认 :8082）
-    handler/            gin 路由与请求处理（统一响应 {"code","msg","data"} + Auth 中间件）
+    handler/            gin 路由与请求处理（统一响应 {"code","msg","data"}）
+    middleware/         gin 中间件（Auth 会话鉴权：Bearer token -> ctx 注入用户名）
     service/            业务层（bcrypt 密码加密 / 内存 Token 会话 / 登录改密）
     dao/                数据访问（user_table：AutoMigrate + 默认 admin 种子）
     modules/            gorm 模型（User）
@@ -163,7 +164,7 @@ OneBot 适配器要点：
 - **会话**：内存 Token（32 字节随机 hex → 用户名，24h 滑动续期），服务重启即失效；
   登录失败统一返回"用户名或密码错误"（防用户名枚举）。后续多实例/持久化时替换为 redis，接口不变。
 - **接口**：`POST /api/v1/login`（公开）、`GET /api/v1/user/info`、`PUT /api/v1/user/password`
-  （后两者走 `Auth()` 中间件：`Authorization: Bearer <token>`，失败 401）。
+  （后两者走 `middleware.Auth(tokens)` 中间件：`Authorization: Bearer <token>`，失败 401）。
 - **统一响应**：`{"code":0,"msg":"ok","data":{...}}`；可判定错误用包级 sentinel
   （`ErrInvalidCredential`/`ErrWrongPassword`/`ErrUserNotFound`/`ErrTokenInvalid`），handler 按 `errors.Is` 映射 HTTP 状态码。
 - **测试**：`runtime_test.go` 用 httptest 走完整 DI 链，依赖 `TEST_PG_DSN`（未设置自动 Skip）。
