@@ -86,8 +86,9 @@ onebot.Driver / feishu.Driver                 ← 平台实现层: 协议通信�
 - **配置变更→重建（handler.go）**：`UpdateRuntimeConfig` 经 `equal`（sonic+MD5）对比 →
   落库 → 运行中驱动 `reCreateXxx`（Stop 旧 → New → Start → 重挂转发泵，事件管道不变）；
   `EnableDriver/DisabledDriver` 落库 + Start/Stop（运行时开关）。
-- **发送路由（handler.go `route`）**：target 非空按已接入 peer 精确匹配；空 target 且恰好一个
-  运行中驱动则自动路由；`SendGroupMessage/SendPrivateMessage(target, chatID string, parts)`
+- **发送路由（handler.go `route`）**：target 为机器人自身标识 self_id ——
+  空 target 默认走飞书驱动；非空 target 精确匹配 OneBot 已接入的机器人（peer），未接入报错。
+  `SendGroupMessage/SendPrivateMessage(target, chatID string, parts)`
   统一 chatID 为 string（OneBot 内部 ParseInt，飞书原生 string）；未知驱动类型返回错误。
 - **平台实现职责**：onebot —— 正向 WS 服务端（NapCat 等接入）、OneBot 事件 ↔ 统一模型双向转换
   （`convertSegments`/`PartsToSegments`）、echo 请求-响应 Call；feishu —— **WebSocket 长连接**

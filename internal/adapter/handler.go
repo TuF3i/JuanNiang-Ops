@@ -6,36 +6,25 @@ import (
 	"log"
 )
 
-// route 消息发送路由: target 非空精确匹配已接入的机器人;
-// target 为空时, 有且仅有一个运行中的驱动才自动路由, 否则报错.
+// route 消息发送路由: target 为机器人自身标识 self_id.
+//   - target 为空: 默认走飞书驱动 (单机器人长连接, 无路由歧义)
+//   - target 非空: 精确匹配 OneBot 已接入的机器人 (peer), 未接入或断开则报错
 func (r *Runtime) route(target string) (DriverType, error) {
-	if target != "" {
-		if st := r.OnebotDriver.driver.GetCurrentState(); st.IsRunning {
-			if _, ok := st.PeerList[target]; ok {
-				return OnebotDriver, nil
-			}
+	if target == "" {
+		if r.FeishuDriver != nil && r.FeishuDriver.driver.GetCurrentState().IsRunning {
+			return FeishuDriver, nil
 		}
-		// TODO: 飞书 peer 识别 (飞书无长连接, 无法按 target 精确匹配, 走下方自动路由)
-
-		return "", fmt.Errorf("route -> peer not found or disconnected")
+		return "", fmt.Errorf("route -> feishu driver is not running")
 	}
 
-	// 空target 自动路由: 恰好一个运行中的驱动
-	var running []DriverType
-	if r.OnebotDriver != nil && r.OnebotDriver.driver.GetCurrentState().IsRunning {
-		running = append(running, OnebotDriver)
+	if r.OnebotDriver == nil {
+		return "", fmt.Errorf("route -> onebot driver is not initialized")
 	}
-	if r.FeishuDriver != nil && r.FeishuDriver.driver.GetCurrentState().IsRunning {
-		running = append(running, FeishuDriver)
+	st := r.OnebotDriver.driver.GetCurrentState()
+	if _, ok := st.PeerList[target]; ok {
+		return OnebotDriver, nil
 	}
-	switch len(running) {
-	case 1:
-		return running[0], nil
-	case 0:
-		return "", fmt.Errorf("route -> no running driver")
-	default:
-		return "", fmt.Errorf("route -> multiple running drivers, target required")
-	}
+	return "", fmt.Errorf("route -> peer %s not found or disconnected", target)
 }
 
 // reCreateOnebotDriverV11 重建 OneBot 驱动 (配置变更后调用):

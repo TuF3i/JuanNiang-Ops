@@ -145,7 +145,8 @@ func (r *Runtime) GetAdapterConfig(driverType DriverType) (any, error) {
 	}
 }
 
-// SendGroupMessage 发送群消息: target 为目标机器人 self_id (空则自动路由唯一运行中的驱动).
+// SendGroupMessage 发送群消息: target 为机器人自身标识 self_id ——
+// 空则走飞书驱动; 非空则精确匹配 OneBot 已接入的机器人, 未接入报错.
 // chatID 为群会话 ID (OneBot 群号 / 飞书 chat_id), 部件为平台无关统一消息.
 func (r *Runtime) SendGroupMessage(target string, chatID string, msg []common.MessagePart) error {
 	r.mu.Lock()
@@ -187,7 +188,8 @@ func (r *Runtime) SendGroupMessage(target string, chatID string, msg []common.Me
 	}
 }
 
-// SendPrivateMessage 发送私聊消息: target 为目标机器人 self_id (空则自动路由).
+// SendPrivateMessage 发送私聊消息: target 为机器人自身标识 self_id ——
+// 空则走飞书驱动; 非空则精确匹配 OneBot 已接入的机器人, 未接入报错.
 // chatID 为对方用户 ID (OneBot QQ 号 / 飞书 open_id).
 func (r *Runtime) SendPrivateMessage(target string, chatID string, msg []common.MessagePart) error {
 	r.mu.Lock()
