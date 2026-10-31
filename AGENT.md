@@ -52,6 +52,13 @@ internal/
     response/           统一响应与业务错误封装（Response 实现 error，业务错误 var 集合）
     dao/                数据访问（user_table：AutoMigrate + 默认 admin 种子）
     modules/            gorm 模型（User）
+  operator/             统一操作层 ★ 资产聚合（agent/workflow 的操作基本单位）
+    runtime.go          CreateRuntime/ReleaseRuntime（Option: WithDB），同构 adapter
+    modules/            资产模型 / 媒介通道类型 / 各集成 Config / 统一结果模型
+    dao/                资产持久化（operator_assets：AutoMigrate 无种子，CRUD 软删）
+    service/            实例生命周期（LoadEnabled/Enable/Disable/reCreate）+ 统一操作 API + 路由
+    media/              操作媒介接口 + 实现（ssh / telnet / pve / k8s）
+    channel/            数据通道接口 + 实现（prometheus / loki / tempo / outline）
   db/                   数据访问（dao / cache，待实现）
   workflow/             工作流（待实现）
 api/                    HTTP API 接口文档（openapi.yaml，与代码包 internal/api 分离）
@@ -181,6 +188,39 @@ OneBot 适配器要点：
   系统错误走 `ServerInternalError(err)`=500 携带详情）。接口文档见根目录 `api/openapi.yaml`。
 - **测试**：`runtime_test.go` 用 httptest 走完整 DI 链，依赖 `TEST_PG_DSN` + `TEST_REDIS_ADDR`
   （任一未设置自动 Skip）。
+
+## operator 模块（internal/operator）
+
+统一操作层：将多个**操作媒介**（ssh/telnet/pve/k8s）与多个**数据通道**（prometheus/loki/tempo/outline）
+聚合为**资产**（Asset）——agent/workflow 操作的基本单位。模块骨架与 adapter 同构（顶层 runtime 组装，
+错误用 standard_go 模式：sentinel `ErrXxx` + `%w`，见 DEVELOPMENT.yaml）。
+
+- **资产模型**：`operator_assets` 表（uuid 主键 / 软删 / Tags+Metadata+Media+Channels 均为 JSON 列）。
+  媒介/通道配置存 kind→JSON 字符串，`modules.ParseMediaConfig/ParseChannelConfig` 解析为类型化 Config。
+  资产是用户数据：**只建表无种子行**（与 adapter 配置表的幂等种子不同）。
+- **实例生命周期（service/lifecycle.go）**：配置常驻 DB，**仅 Enabled=true 的资产创建实例**
+  （`AssetInstance{asset 快照, media map, channels map}`）。顺序约定：先落库再动内存；
+  `buildInstance` 单个媒介/通道构建失败**跳过并记日志**（部分能力缺失优于整体不可用）；
+  Enable 失败不回滚 enabled（保持未运行等重试）；UpdateAsset 走 sonic+MD5 对比 → 落库 → 运行中重建；
+  实例无 goroutine（SSH/Telnet 短连接，其余 HTTP 客户端），无 done/wg。
+- **路由语义（service/route.go，仿 adapter route）**：kind 指定则精确匹配（缺失报 `ErrNoMedia/ErrNoChannel`），
+  为空按预定义优先级自动选择（Exec: ssh → telnet），多个可选报 `ErrAmbiguousMedia/ErrAmbiguousChannel`，
+  能力缺失报 `ErrNoCapability`。
+- **统一 API（service/api.go）**：资产管理（Create/Get/List/Update/Delete/Enable/Disable/GetStatus，
+  tags 过滤为内存过滤）+ 高频操作便捷方法（`Exec/QueryMetrics/QueryRange/QueryLogs/SearchTraces/
+  GetTrace/SearchDocs/GetDoc`）+ 低频特化操作（`Media()/Channel()` 拿实例引用后由调用方断言能力接口，
+  如 pve 虚机启停）。
+- **能力接口（隐式匹配，实现与接口一字不差）**：media —— `CommandRunner`（ssh/telnet）、
+  `VMOperator`（pve）、`K8sOperator`（k8s）；channel —— `MetricsQuerier`（prometheus）、`LogQuerier`（loki）、
+  `TraceSearcher`（tempo）、`DocSearcher`（outline）。新增集成：实现接口 → `modules` 加 Config 与 Parse 分支 →
+  service/factory.go 挂接 case。
+- **实现要点**：ssh —— x/crypto/ssh，Exec 短连接（v1 取舍），非零退出码是结果而非错误；telnet ——
+  最小 RFC854 IAC 处理（`stripIAC` 表驱动单测），Prompt 正则可配；pve —— REST `/api2/json`
+  `PVEAPIToken` 认证，`{"data":...}` 包裹解码，电源操作为异步任务不等待；k8s —— client-go，
+  `cs` 字段用 `kubernetes.Interface` 便于 fake 注入，PodLogs 限 1MB；HTTP 手写客户端复用 t2i 范式
+  （do/doJSON/decodeJSON），loki/tempo/outline 各自内聚实现。
+- **测试**：路由用 stub 直填实例表（纯内存）；生命周期/资产管理依赖 `TEST_PG_DSN`（未设置自动 Skip）；
+  k8s 用 fake clientset（scale 子资源缺口用 reactor 模拟）；HTTP 客户端用 httptest 假服务端。
 
 ## 编码规范
 
