@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"JuanNiang-Ops/internal/operator/channel"
+	lokichannel "JuanNiang-Ops/internal/operator/channel/loki"
+	promchannel "JuanNiang-Ops/internal/operator/channel/prometheus"
 	k8smedia "JuanNiang-Ops/internal/operator/media/k8s"
 	pvemedia "JuanNiang-Ops/internal/operator/media/pve"
 	sshmedia "JuanNiang-Ops/internal/operator/media/ssh"
@@ -37,7 +39,15 @@ func newMedia(kind modules.MediaKind, rawCfg string) (media.Media, error) {
 
 // newChannel 按类型构建数据通道 (与 newMedia 同构)
 func newChannel(kind modules.ChannelKind, rawCfg string) (channel.Channel, error) {
-	switch kind {
+	parsed, err := modules.ParseChannelConfig(kind, rawCfg)
+	if err != nil {
+		return nil, fmt.Errorf("new channel -> %w", err)
+	}
+	switch cfg := parsed.(type) {
+	case *modules.PrometheusConfig:
+		return promchannel.New(*cfg)
+	case *modules.LokiConfig:
+		return lokichannel.New(*cfg)
 	default:
 		return nil, fmt.Errorf("new channel -> %w: %s", ErrUnknownChannelKind, kind)
 	}
