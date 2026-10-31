@@ -3,10 +3,12 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 	"gorm.io/driver/postgres"
@@ -239,4 +241,82 @@ func TestChangePasswordFlow(t *testing.T) {
 	result = do(t, rt, http.MethodPut, "/api/v1/user/password", newAccess,
 		map[string]string{"old_password": "newpass456", "new_password": "admin123"})
 	expectStatus(t, result, response.OperationSuccess.Status)
+}
+
+// TestOperatorAssetFlow 资产管理全链路 (三步创建流程):
+// 登录 → 建媒介实体 → 建资产 → 绑定 → 启用 → 状态 → 解绑 → 删除; 含在用删除拒绝.
+func TestOperatorAssetFlow(t *testing.T) {
+	rt := newTestRuntime(t)
+	access, _ := login(t, rt, "admin", "admin123")
+	uniq := fmt.Sprintf("%d", time.Now().UnixNano())
+
+	// 1. 创建媒介实体 (SSH, 离线可构建)
+	result := do(t, rt, http.MethodPost, "/api/v1/operator/media", access,
+		map[string]string{"name": "ssh-shared-" + uniq, "kind": "media.ssh",
+			"config": `{"host":"127.0.0.1","user":"root","password":"x"}`})
+	expectStatus(t, result, response.OperationSuccess.Status)
+	mediaData, _ := result["data"].(map[string]any)
+	mediaID, _ := mediaData["id"].(string)
+	if mediaID == "" {
+		t.Fatalf("media id missing: %v", result)
+	}
+	t.Cleanup(func() {
+		do(t, rt, http.MethodDelete, "/api/v1/operator/media/"+mediaID, access, nil)
+	})
+
+	// 2. 创建资产 (纯描述信息)
+	result = do(t, rt, http.MethodPost, "/api/v1/operator/asset", access,
+		map[string]any{"name": "e2e-asset-" + uniq, "description": "e2e", "tags": []string{"e2e"}})
+	expectStatus(t, result, response.OperationSuccess.Status)
+	assetData, _ := result["data"].(map[string]any)
+	assetID, _ := assetData["id"].(string)
+	if assetID == "" {
+		t.Fatalf("asset id missing: %v", result)
+	}
+	t.Cleanup(func() {
+		do(t, rt, http.MethodDelete, "/api/v1/operator/asset/"+assetID, access, nil)
+	})
+
+	// 3. 绑定媒介到资产 (幂等: 重复绑定仍成功)
+	result = do(t, rt, http.MethodPost, "/api/v1/operator/asset/"+assetID+"/media", access,
+		map[string]string{"source_id": mediaID})
+	expectStatus(t, result, response.OperationSuccess.Status)
+	result = do(t, rt, http.MethodPost, "/api/v1/operator/asset/"+assetID+"/media", access,
+		map[string]string{"source_id": mediaID})
+	expectStatus(t, result, response.OperationSuccess.Status)
+
+	// 绑定列表含该媒介
+	result = do(t, rt, http.MethodGet, "/api/v1/operator/asset/"+assetID+"/media", access, nil)
+	expectStatus(t, result, response.OperationSuccess.Status)
+	bound, _ := result["data"].([]any)
+	if len(bound) != 1 {
+		t.Fatalf("bound media = %v, want 1", result["data"])
+	}
+
+	// 媒介在用删除拒绝 → 10021
+	result = do(t, rt, http.MethodDelete, "/api/v1/operator/media/"+mediaID, access, nil)
+	expectStatus(t, result, response.OperatorInUse.Status)
+
+	// 启用 → 状态 Running
+	result = do(t, rt, http.MethodPost, "/api/v1/operator/asset/"+assetID+"/enable", access, nil)
+	expectStatus(t, result, response.OperationSuccess.Status)
+	result = do(t, rt, http.MethodGet, "/api/v1/operator/asset/"+assetID+"/status", access, nil)
+	expectStatus(t, result, response.OperationSuccess.Status)
+	statusData, _ := result["data"].(map[string]any)
+	if running, _ := statusData["running"].(bool); !running {
+		t.Fatalf("asset should be running: %v", statusData)
+	}
+
+	// 资产未运行时操作媒介类接口不在本流程 (Exec 等直连接口后续接)
+
+	// 解绑 → 再删除媒介成功
+	result = do(t, rt, http.MethodDelete, "/api/v1/operator/asset/"+assetID+"/media", access,
+		map[string]string{"source_id": mediaID})
+	expectStatus(t, result, response.OperationSuccess.Status)
+	result = do(t, rt, http.MethodDelete, "/api/v1/operator/media/"+mediaID, access, nil)
+	expectStatus(t, result, response.OperationSuccess.Status)
+
+	// 不存在的资产 → 10020
+	result = do(t, rt, http.MethodGet, "/api/v1/operator/asset/asset-404", access, nil)
+	expectStatus(t, result, response.OperatorNotFound.Status)
 }
