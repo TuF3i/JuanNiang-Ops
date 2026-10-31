@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"JuanNiang-Ops/internal/operator/channel"
+	k8smedia "JuanNiang-Ops/internal/operator/media/k8s"
+	pvemedia "JuanNiang-Ops/internal/operator/media/pve"
 	sshmedia "JuanNiang-Ops/internal/operator/media/ssh"
 	telnetmedia "JuanNiang-Ops/internal/operator/media/telnet"
 	"JuanNiang-Ops/internal/operator/media"
@@ -24,6 +26,10 @@ func newMedia(kind modules.MediaKind, rawCfg string) (media.Media, error) {
 		return sshmedia.New(*cfg)
 	case *modules.TelnetConfig:
 		return telnetmedia.New(*cfg)
+	case *modules.PVEConfig:
+		return pvemedia.New(*cfg)
+	case *modules.K8sConfig:
+		return k8smedia.New(*cfg)
 	default:
 		return nil, fmt.Errorf("new media -> %w: %s", ErrUnknownMediaKind, kind)
 	}
