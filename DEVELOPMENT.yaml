@@ -1,0 +1,236 @@
+# =============================================================================
+# DEVELOPMENT.yaml — JuanNiang-Ops 开发指南 (机器可读)
+#
+# 面向 AI Agent 与新加入的开发者: 架构分层 / 依赖注入 / 错误处理 / 并发模式 /
+# 编码规范 / 测试约定 / 已知陷阱. 内容与 AGENT.md 保持同步, 公共 API 变更时两份都更新.
+# 接口文档见 api/openapi.yaml.
+# =============================================================================
+
+project:
+  name: JuanNiang-Ops
+  title: 卷娘巡检姬
+  description: >-
+    QQ 机器人运维/巡检平台. 经 OneBot v11 正向 WebSocket (go-cqhttp / Lagrange / NapCat)
+    与飞书 WSS 长连接 (官方 SDK) 接入机器人实现端, 平台事件转换为统一消息模型后交给业务层.
+  go_module: JuanNiang-Ops
+  go_version: "1.27+"
+  docs_language: zh-CN                     # 注释/文档/提交信息统一中文
+  goproxy: "https://goproxy.cn,direct"
+
+# ---------------------------------------------------------------- 常用命令 ---
+commands:
+  build: "go build ./..."
+  vet: "go vet ./..."
+  test: "go test ./internal/adapter/... -count=1"
+  test_race: "go test ./internal/adapter/onebot/ -race"
+  tidy: "go mod tidy"
+  low_memory: "go test -p 2 ./..."         # 低内存机器限制编译并行度
+  pre_commit:
+    - "go vet ./..."
+    - "go test ./internal/adapter/... -count=1"   # 涉并发改动追加 -race
+  notes:
+    - 依赖缓存 ~/.cache/go-build 预热后编译秒级, 不要随意删除
+    - 本仓库未接 CI, 上述检查全靠自觉执行
+
+# ------------------------------------------------------------ 目录与分层 ---
+directory_structure:
+  cmd/cobra:       { purpose: 程序入口 (cobra), status: 待实现 }
+  config/viper:    { purpose: 配置加载 (viper), status: 待实现, note: infrastructure 默认值目前硬编码, 落地后替换为配置读取 }
+  internal/adapter: { purpose: 平台适配器模块 (OneBot/飞书), status: 已完成 }
+  internal/agent:  { purpose: Agent 编排 (业务层, 消费 adapter 事件), status: 待实现 }
+  internal/api:    { purpose: HTTP API 模块 (gin), status: 已完成 }
+  internal/workflow: { purpose: 工作流 (业务层), status: 待实现 }
+  infrastructure:  { purpose: 基础设施客户端 (postgres/redis/t2i), status: 已完成 }
+  api:             { purpose: OpenAPI 接口文档 (openapi.yaml), note: 与代码包 internal/api 分离, 勿放错 }
+  web:             { purpose: 前端 (React 19 + Vite + HeroUI), status: 登录页已完成 }
+  docs:            { purpose: 设计与实施计划文档 }
+  sql:             { purpose: 数据库迁移脚本, status: 空 }
+  deployment:      { purpose: 部署清单, status: 空 }
+
+module_skeleton:
+  description: >-
+    每个业务模块 (internal/*) 结构同构: 模块 = 自包含小应用, 可独立装配/测试/释放;
+    新模块 (agent/workflow) 沿用同一骨架.
+  files:
+    runtime.go: 模块唯一顶层文件; 包注释即模块架构文档 (分层图 + 用法); 只负责组装与生命周期, 无业务方法
+    modules: 纯数据模型 (gorm 模型/DTO/统一消息), 不含业务
+    dao: 只做 gorm 数据操作; 建表/种子用 SetupXxx (幂等)
+    service: 业务逻辑与运行时状态; 组合 dao 与其他组件; 导出业务 API
+    handler: gin 参数绑定与错误映射; 业务一律下沉 service (api 特有)
+    middleware: 横切关注点 (会话鉴权); 只做校验与 ctx 注入 (api 特有)
+    cache: 只管 Redis 读写 (api 特有)
+    response: 统一响应与业务错误码集合 (api 特有)
+    driver: 平台驱动实现, 经 driver.Driver 接口隐式匹配 (adapter 特有)
+  dependency_rules:
+    - "单向依赖: handler → service → dao → db"
+    - modules 与 response 是"叶"包: 被所有层依赖, 不依赖同模块其他包
+    - service 依赖接口而非实现: driver.Driver 由 onebot/feishu 包隐式实现
+    - 跨模块只经对方 Runtime 暴露的 API 交互 (如 rt.Service.Events()), 不 import 对方内部包
+
+# -------------------------------------------------------------- 核心模式 ---
+patterns:
+
+  # --- 依赖注入 ---
+  di:
+    module_boundary:
+      pattern: functional options
+      example: "CreateRuntime(WithDB(db), WithRedis(rdb), WithAddr(\":8082\"))"
+      impl: |
+        type Option func(*options)
+        type options struct{ db *gorm.DB; rdb *redis.Client; addr string }
+        func WithDB(db *gorm.DB) Option { return func(o *options) { o.db = db } }
+    internal_chain:
+      pattern: 构造函数注入 (不用 wire/dig, 纯手工装配链)
+      chain: "Dao(NewDao(db)) + TokenCache(Redis) → Service(NewService) → Handler(NewHandler)"
+    injection_rule: 注入优先, 否则自建 — 未注入则经 infrastructure 建默认连接并置 ownDB=true
+    ownership:
+      - ownDB 标志决定 Release 是否关闭连接: 注入的不关 (调用方负责), 自建的必须关
+    default_runtime:
+      - CreateRuntime 将实例记入包级 defaultRuntime; 包级 ReleaseRuntime() 供不持句柄的调用方使用
+    release:
+      - "Release 一律幂等: nil 接收者直接返回, 重复调用安全"
+      - "Runtime 结构体保持薄: 只持装配链引用与生命周期资源, 业务方法全在 Service 上"
+
+  # --- 错误处理 (两套并存, 按模块选择) ---
+  error_handling:
+    mode_selection:
+      standard_go: 适用于 adapter / infrastructure / driver 及新模块 (api 除外)
+      response_tuple: 仅 internal/api (既定模式, 参照 CourseSelectionMS); api 内新接口沿用
+    standard_go:
+      - 包内定义 sentinel error (var ErrXxx), 调用方 errors.Is 判定
+      - "包装错误用 %w 并携带操作路径前缀, 如 fmt.Errorf(\"recreate onebot driver v11 -> %w\", err)"
+    response_tuple:
+      - 业务错误 = response 包级 var 集合 (Response 实现 error 接口), 非构造调用
+      - 层间方法签名: (data, rsp) 元组; 错误原样上抛不包装
+      - 成败判定: errors.Is(rsp, response.OperationSuccess)
+      - handler 统一出口 GenFinalResponse: HTTP 恒 200, 业务码在 status 字段
+      - 系统错误才用 ServerInternalError(err) 携带底层详情 (status=500)
+    cross_cutting_rules:
+      - 防用户名枚举: 登录失败统一返回 UserNotExiOrWrongPwd
+      - 敏感数据不出 Service 层: 密码哈希返回前脱敏 (user.Password 置空)
+
+  # --- 并发 ---
+  concurrency:
+    channel_write:
+      description: 所有管道写入走双 select, 保证 Stop 关闭管道时不发生 send-on-closed panic
+      code: |
+        select {
+        case <-r.done: // 所有者已关闭, 放弃写入
+            return
+        case r.events <- ev:
+        }
+    forward_pump:
+      description: 每个驱动挂一个 goroutine 做事件合流 (driver.Events → svc.events)
+      exit_signals: [r.done 关闭 (Service 释放), 驱动 Events 管道关闭 (驱动 Stop), 投递阻塞时 done 兜底]
+      rule: goroutine 退出路径必须有 wg.Done 或明确所有者
+    service_release_order:
+      description: Service.Release 顺序 (勿改)
+      steps: [close(done), cancel/Stop 全部驱动, wg.Wait(), close(events) 通知下游]
+    driver_stop_order:
+      description: onebot Driver.Stop 顺序 (勿改)
+      steps: [running=false + close(done), 关 listener, 断开客户端, 等待中 Call 全部回执失败, wg.Wait(), 关 Inbound/Notices + 清连接表]
+    recreate:
+      description: >-
+        配置变更重建驱动: Stop 旧 → NewDriver(新配置) → Start → 重挂转发泵.
+        对外 events 管道不变, 业务层无感知; 全部启停/重建/释放由 mu 串行化
+      invariant: 对外 events 管道不变, 业务层无感知
+      serialization: 全部启停/重建/释放由 mu 串行化
+
+# ------------------------------------------------------------ 驱动接口契约 ---
+driver_contract:
+  interface: driver.Driver
+  members:
+    Start_Stop: 生命周期; Start 幂等 (重复调用报错), Stop 幂等且阻塞至完全退出
+    Events: 统一事件管道 <-chan modules.Event (消息+通知合流), Stop 时关闭
+    Done: 停止信号 <-chan struct{}, 与管道配合消费
+    GetCurrentState: 状态快照
+  invariant: 业务层不接触平台原生结构; 平台事件 ↔ 统一消息模型 (modules.Message/Event) 的转换只在驱动内做
+
+# -------------------------------------------------------------- 编码规范 ---
+conventions:
+  naming:
+    constructor: NewXxx
+    option: WithXxx
+    idempotent_setup: SetupXxx       # 建表/种子, 幂等
+    private_recreate: reCreateXxx
+    sentinel_error: ErrXxx
+    private_bool: isXxx
+  constants: 必须带类型, 如 Group MessageType = "message.public" (无类型常量按默认类型推导, 曾致编译错误)
+  comments:
+    package_doc: 写在模块 runtime.go, 内容 = 分层图 + 一句话用法
+    file_doc: 文件头注释 = 本文件职责边界 (如 "handler 只做参数绑定与错误映射")
+    exported: 导出符号必须有中文注释, 起手重复符号名
+    inline: 解释"为什么"而非"是什么"; 顺序约束与陷阱必须注明原因
+  logs:
+    prefix: 统一 "[模块名] " 前缀 (如 [adapter] / [api] / [onebot])
+    rule: 只记录一次性事件; 严禁循环中无限制打日志
+  api_changes: 公共 API 变更需同步更新测试 + AGENT.md + 本文件
+
+# ---------------------------------------------------------------- 测试约定 ---
+testing:
+  location: 测试与被测包同目录 (包内测试, 便于访问非导出成员)
+  e2e: 端到端用真实 gws 客户端 (dialTestClient); api 模块用 httptest 走完整 DI 链
+  external_deps:
+    - 依赖真实 PG/Redis 时读 TEST_PG_DSN / TEST_REDIS_ADDR, 任一未设置自动 Skip
+  waits: 所有等待必须带超时 (waitFor/recvIn辅助函数); 禁止无超时阻塞等待; -timeout 兜底
+  race: 多客户端场景先等 self_id 绑定完成再断言; 涉并发改动提交前加 -race
+
+# -------------------------------------------------------------- 已知陷阱 ---
+pitfalls:
+  - id: gws-run-listener
+    problem: gws.RunListener 不会因 listener.Close() 退出, 会无限刷 accept 错误日志吃满 CPU/内存
+    rule: onebot 自行实现 accept 循环 (runWebSocket + handleConn + UpgradeFromConn), 判 net.ErrClosed 后正常返回; 改网络层勿回退
+  - id: gws-message-close
+    problem: gws 的 *gws.Message 用完必须 defer message.Close() 回收缓冲
+  - id: upgrade-double-close
+    problem: UpgradeFromConn 失败时内部已写回 400 并关闭连接, 外层不要再关一次
+  - id: upgrade-br
+    problem: 握手需自 http.ReadRequest(br), 且把同一个 br 传给 UpgradeFromConn (内部可能还有缓冲数据)
+  - id: gorm-clauses-order
+    problem: gorm Clauses 必须挂在 Create 之前, 否则 SQL 已执行、子句不生效 (幂等种子失败)
+  - id: untyped-const
+    problem: 常量必须带类型, 否则按默认类型推导 (曾致 msgType := common.Group 推导成 string)
+
+# ---------------------------------------------------------------- 前端 ---
+frontend:
+  root: web
+  stack:
+    framework: React 19 (JavaScript, 非 TS)
+    bundler: Vite 8 + @vitejs/plugin-react
+    ui: "HeroUI v3 (@heroui/react + @heroui/styles) + Tailwind CSS v4 (@tailwindcss/vite)"
+  entry:
+    html: index.html — html 挂 class="dark" data-theme="dark"; body 挂 bg-background text-foreground
+    js: src/main.jsx (createRoot 挂载 #root) → src/App.jsx (Mock 登录态存 sessionStorage)
+  structure:
+    src/components: 页面组件 (Login.jsx 等); 样式优先 Tailwind 工具类, 不再新建手写 css
+    src/globals.css: "@import \"tailwindcss\"; 再 @import \"@heroui/styles\"; (顺序不能反)"
+    src/assets: 图片资源
+  commands:
+    dev: "npm run dev"
+    build: "npm run build"
+    preview: "npm run preview"
+  conventions:
+    - 交互组件优先用 HeroUI (Button/TextField/...), 用 isPending/isDisabled/isInvalid 等语义化 props
+    - 主题取 HeroUI 令牌 (bg-background / bg-content1 / border-default-100 / text-default-400); 品牌渐变等特殊效果用内联 style
+    - 绝对定位的浮动控件 (如密码眼睛) 必须包在 relative 容器内, 勿依赖页面级定位
+    - 全局 keyframes 等加 jn- 前缀防冲突
+  auth_note: 登录目前为 Mock (MOCK_USERS + sessionStorage); 后端就绪后替换为 /api/v1/login + 双 Token 流程
+
+# ---------------------------------------------------------------- 进度 ---
+status:
+  done:
+    - OneBot v11 适配器 (正向 WS 服务端, 多机器人路由, echo Call, 完整单测)
+    - 飞书 WSS 长连接驱动 + 统一 Event 模型 + Runtime 生命周期
+    - HTTP API (登录 / 双 Token 会话 / 改密, Redis 存储, 统一业务码响应)
+    - 前端迁移 React 19, HeroUI 重构登录页
+  todo:
+    - cmd/cobra 程序入口
+    - config/viper 配置加载
+    - internal/agent (消费 adapter 事件的业务编排)
+    - internal/workflow
+    - sql/ 迁移脚本, deployment/ 部署清单, CI 接入
+
+references:
+  - AGENT.md (本文件的散文版, 内容保持同步)
+  - api/openapi.yaml (HTTP 接口文档, OpenAPI 3.1)
+  - docs/ (模块实施计划)
