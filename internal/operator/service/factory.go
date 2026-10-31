@@ -7,13 +7,23 @@ import (
 	"time"
 
 	"JuanNiang-Ops/internal/operator/channel"
+	sshmedia "JuanNiang-Ops/internal/operator/media/ssh"
+	telnetmedia "JuanNiang-Ops/internal/operator/media/telnet"
 	"JuanNiang-Ops/internal/operator/media"
 	"JuanNiang-Ops/internal/operator/modules"
 )
 
 // newMedia 按类型构建操作媒介 (rawCfg 为对应 Config 结构体的 JSON, 空串取全默认值)
 func newMedia(kind modules.MediaKind, rawCfg string) (media.Media, error) {
-	switch kind {
+	parsed, err := modules.ParseMediaConfig(kind, rawCfg)
+	if err != nil {
+		return nil, fmt.Errorf("new media -> %w", err)
+	}
+	switch cfg := parsed.(type) {
+	case *modules.SSHConfig:
+		return sshmedia.New(*cfg)
+	case *modules.TelnetConfig:
+		return telnetmedia.New(*cfg)
 	default:
 		return nil, fmt.Errorf("new media -> %w: %s", ErrUnknownMediaKind, kind)
 	}
