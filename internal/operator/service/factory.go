@@ -8,7 +8,9 @@ import (
 
 	"JuanNiang-Ops/internal/operator/channel"
 	lokichannel "JuanNiang-Ops/internal/operator/channel/loki"
+	outlinechannel "JuanNiang-Ops/internal/operator/channel/outline"
 	promchannel "JuanNiang-Ops/internal/operator/channel/prometheus"
+	tempochannel "JuanNiang-Ops/internal/operator/channel/tempo"
 	k8smedia "JuanNiang-Ops/internal/operator/media/k8s"
 	pvemedia "JuanNiang-Ops/internal/operator/media/pve"
 	sshmedia "JuanNiang-Ops/internal/operator/media/ssh"
@@ -48,6 +50,10 @@ func newChannel(kind modules.ChannelKind, rawCfg string) (channel.Channel, error
 		return promchannel.New(*cfg)
 	case *modules.LokiConfig:
 		return lokichannel.New(*cfg)
+	case *modules.TempoConfig:
+		return tempochannel.New(*cfg)
+	case *modules.OutlineConfig:
+		return outlinechannel.New(*cfg)
 	default:
 		return nil, fmt.Errorf("new channel -> %w: %s", ErrUnknownChannelKind, kind)
 	}
