@@ -22,7 +22,7 @@ type Client struct {
 
 // 编译期断言能力实现
 var (
-	_ channel.Channel       = (*Client)(nil)
+	_ channel.Channel        = (*Client)(nil)
 	_ channel.MetricsQuerier = (*Client)(nil)
 )
 

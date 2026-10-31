@@ -23,6 +23,10 @@ import (
 	"JuanNiang-Ops/internal/operator/service"
 )
 
+// Service 服务类型别名: 供其他模块 (internal/api handler 等) 经 operator 包引用,
+// 不深入 service 内部包 (跨模块只经对方 Runtime 暴露的 API 交互).
+type Service = service.Service
+
 // Runtime operator 模块运行时: 只负责组装与创建/释放, 业务方法全部在 Service 上.
 type Runtime struct {
 	Service *service.Service

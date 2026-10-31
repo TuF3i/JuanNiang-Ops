@@ -33,9 +33,9 @@ func TestStripIAC(t *testing.T) {
 			reply:   []byte{iacIAC, iacWONT, 24},
 		},
 		{
-			name:    "WILL 请求回 DONT 拒绝",
-			in:      []byte{iacIAC, iacWILL, 1},
-			reply:   []byte{iacIAC, iacDONT, 1},
+			name:  "WILL 请求回 DONT 拒绝",
+			in:    []byte{iacIAC, iacWILL, 1},
+			reply: []byte{iacIAC, iacDONT, 1},
 		},
 		{
 			name:    "DONT/WONT 无需响应",

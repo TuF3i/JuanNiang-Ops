@@ -11,11 +11,11 @@ import (
 	outlinechannel "JuanNiang-Ops/internal/operator/channel/outline"
 	promchannel "JuanNiang-Ops/internal/operator/channel/prometheus"
 	tempochannel "JuanNiang-Ops/internal/operator/channel/tempo"
+	"JuanNiang-Ops/internal/operator/media"
 	k8smedia "JuanNiang-Ops/internal/operator/media/k8s"
 	pvemedia "JuanNiang-Ops/internal/operator/media/pve"
 	sshmedia "JuanNiang-Ops/internal/operator/media/ssh"
 	telnetmedia "JuanNiang-Ops/internal/operator/media/telnet"
-	"JuanNiang-Ops/internal/operator/media"
 	"JuanNiang-Ops/internal/operator/modules"
 )
 

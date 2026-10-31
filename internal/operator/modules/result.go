@@ -25,11 +25,11 @@ type MetricSeries struct {
 
 // LogQuery 日志查询条件 (Loki LogQL)
 type LogQuery struct {
-	Selector  string     // LogQL 选择器, 如 {job="nginx"}
-	Start     time.Time  // 为零值时省略
-	End       time.Time  // 为零值时省略
-	Limit     int        // 0 时取 DefaultLogLimit
-	Direction string     // "forward" | "backward" (默认 backward)
+	Selector  string    // LogQL 选择器, 如 {job="nginx"}
+	Start     time.Time // 为零值时省略
+	End       time.Time // 为零值时省略
+	Limit     int       // 0 时取 DefaultLogLimit
+	Direction string    // "forward" | "backward" (默认 backward)
 }
 
 // LogEntry 日志条目
