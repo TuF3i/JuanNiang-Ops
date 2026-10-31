@@ -83,7 +83,7 @@ export default function Login({ onLoginSuccess }) {
           src={logoImg}
           alt="JuanNiang logo"
         />
-        <span className="bg-gradient-to-r from-primary to-pink-500 bg-clip-text text-2xl font-extrabold text-transparent">
+        <span className="text-2xl font-extrabold text-foreground">
           JuanNiang
         </span>
       </div>
@@ -92,7 +92,7 @@ export default function Login({ onLoginSuccess }) {
         {/* 左侧: 登录表单 */}
         <div className="flex flex-1 basis-[46%] flex-col px-8 pt-10 pb-8 sm:px-14">
           <div className="mb-8 flex items-center justify-between">
-            <h1 className="bg-gradient-to-r from-primary to-pink-500 bg-clip-text text-3xl font-bold tracking-wide text-transparent">
+            <h1 className="text-3xl font-bold tracking-wide text-foreground">
               登录
             </h1>
             <Button variant="ghost" size="sm" className="text-default-500">
@@ -154,10 +154,6 @@ export default function Login({ onLoginSuccess }) {
               {loading ? '登录中...' : '登录'}
             </Button>
           </form>
-
-          <p className="mt-auto pt-7 text-center text-xs text-default-400">
-            Mock 模式: admin / admin123 或 juan / juan123
-          </p>
         </div>
 
         {/* 右侧: 品牌插画区 */}
