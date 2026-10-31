@@ -19,11 +19,16 @@ var (
 	ErrNoMedia            = errors.New("operator -> asset has no such media")
 	ErrNoChannel          = errors.New("operator -> asset has no such channel")
 	ErrNoCapability       = errors.New("operator -> media/channel does not implement required capability")
-	ErrAmbiguousMedia     = errors.New("operator -> asset has multiple capable media, specify kind")
-	ErrAmbiguousChannel   = errors.New("operator -> asset has multiple capable channels, specify kind")
+	ErrAmbiguousMedia     = errors.New("operator -> asset has multiple capable media, specify source id")
+	ErrAmbiguousChannel   = errors.New("operator -> asset has multiple capable channels, specify source id")
 	ErrInvalidAssetConfig = errors.New("operator -> invalid asset config")
 	ErrUnknownMediaKind   = errors.New("operator -> unknown media kind")
 	ErrUnknownChannelKind = errors.New("operator -> unknown channel kind")
+
+	ErrMediaSourceNotFound   = errors.New("operator -> media source not found")
+	ErrChannelSourceNotFound = errors.New("operator -> channel source not found")
+	ErrMediaSourceInUse      = errors.New("operator -> media source is bound to assets")
+	ErrChannelSourceInUse    = errors.New("operator -> channel source is bound to assets")
 )
 
 // Service operator 业务层: 装配后的运行时状态持有者.

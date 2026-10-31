@@ -69,7 +69,7 @@ func CreateRuntime(opts ...Option) (*Runtime, error) {
 
 	// 依赖注入链: Dao → Service
 	d := dao.NewDao(db)
-	if err := d.SetupAssets(context.Background()); err != nil {
+	if err := d.Setup(context.Background()); err != nil {
 		return nil, err
 	}
 

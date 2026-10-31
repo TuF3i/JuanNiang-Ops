@@ -11,10 +11,18 @@ import (
 	"JuanNiang-Ops/internal/operator/modules"
 )
 
-// SetupAssets 建表 (幂等)
-func (r *Dao) SetupAssets(ctx context.Context) error {
-	if err := r.db.WithContext(ctx).AutoMigrate(&modules.Asset{}); err != nil {
-		return fmt.Errorf("operator -> migrate operator_assets: %w", err)
+// Setup 建表 (幂等): 资产 + 媒介实体 + 通道实体 + 两张绑定表.
+// 资产/媒介/通道是用户数据, 无幂等种子行 (与 adapter 配置表不同).
+// 注: 旧版 operator_assets 的 media/channels 列由本模型移除, AutoMigrate 不删列, 残留无害.
+func (r *Dao) Setup(ctx context.Context) error {
+	if err := r.db.WithContext(ctx).AutoMigrate(
+		&modules.Asset{},
+		&modules.MediaSource{},
+		&modules.ChannelSource{},
+		&modules.AssetMediaBinding{},
+		&modules.AssetChannelBinding{},
+	); err != nil {
+		return fmt.Errorf("operator -> migrate operator tables: %w", err)
 	}
 	return nil
 }
@@ -62,7 +70,7 @@ func (r *Dao) UpdateAsset(ctx context.Context, asset *modules.Asset) error {
 	return nil
 }
 
-// DeleteAsset 软删资产
+// DeleteAsset 软删资产 (绑定行由 service 先行清理, 此处兜底再清一次防孤儿)
 func (r *Dao) DeleteAsset(ctx context.Context, id string) error {
 	result := r.db.WithContext(ctx).Delete(&modules.Asset{}, "id = ?", id)
 	if result.Error != nil {
@@ -71,7 +79,10 @@ func (r *Dao) DeleteAsset(ctx context.Context, id string) error {
 	if result.RowsAffected == 0 {
 		return fmt.Errorf("operator -> delete asset %s: %w", id, gorm.ErrRecordNotFound)
 	}
-	return nil
+	if err := r.DeleteAssetMediaBindings(ctx, id); err != nil {
+		return err
+	}
+	return r.DeleteAssetChannelBindings(ctx, id)
 }
 
 // SetEnabled 更新启用开关 (RowsAffected==0 表示资产不存在)
