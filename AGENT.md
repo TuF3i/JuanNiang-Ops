@@ -58,7 +58,7 @@ api/                    HTTP API 接口文档（openapi.yaml，与代码包 inte
 infrastructure/         基础设施客户端（postgres / redis / t2i）
 pkg/                    可对外复用的库
 sql/                    数据库迁移脚本（空）
-web/                    前端（Vue3 + Vite 脚手架）
+web/                    前端（React 19 + Vite，JavaScript 非 TS）
 deployment/             部署清单（空）
 docs/                   文档（含实施计划）
 ```
