@@ -120,3 +120,55 @@ HTTP 手写客户端复用 t2i 的 `do/doJSON/decodeJSON` 范式，各客户端�
 - `internal/adapter` 全部（含 onebot Stop 六步顺序、done-channel 写入模式、equal() 的 sonic+MD5 实现）
 - `internal/api`（本次不接资产 CRUD handler）、`infrastructure`、`web`
 - `config/viper`（默认值仍由各 Config 的 DefaultXxx 常量承载，落地后接入）
+
+
+---
+
+## 修订（2026-11-01）：媒介/数据源实体化 + HTTP CRUD
+
+> **状态**：已实施完成
+> **范围**：媒介/数据源从"资产内嵌配置"改为**独立实体 + M:N 绑定**（跨资产共享，
+> 如同机 K8s 资产与 PVE 资产共用同一个 SSH）；新增 HTTP CRUD（`/api/v1/operator/**`）。
+
+### 已确认决策
+
+① service 重构 + HTTP CRUD 同时做；② 同资产允许绑定多个同类媒介（路由引入实体 ID 精确选择）；
+③ 共享语义 v1 = 配置共享、各资产独立连接（连接池留作扩展点）；④ 在用删除拒绝。
+
+### 模型变更
+
+| 变更 | 说明 |
+|---|---|
+| 新表 `operator_media_sources` / `operator_channel_sources` | 独立实体：uuid 主键 + 全局唯一 Name + Kind + Config(JSON text)，软删 |
+| 新表 `operator_asset_media_bindings` / `operator_asset_channel_bindings` | 绑定行：asset_id + source_id 联合唯一；Bind 用 OnConflict DoNothing 幂等；硬删（随实体/资产清理） |
+| `Asset` 移除内嵌 `Media`/`Channels` 列 | AutoMigrate 不删旧列，残留无害；资产只承载描述信息 |
+
+### 三步创建流程
+
+1. 创建媒介/数据源实体：`CreateMediaSource/CreateChannelSource`（Parse 校验 + uuid）
+2. 创建资产：`CreateAsset`（纯 name/description/docs/tags/metadata）
+3. 绑定：`BindAssetMedia/BindAssetChannel`（双存在校验 → 幂等落库 → 运行中资产立即重建）
+
+### 路由与生命周期变更
+
+- `AssetInstance.media/channels` 改为 `[]boundMedia{source, m}` 切片（同 kind 多绑定）
+- 选择参数 = `kind`（粗过滤）+ `sourceID`（精确）：sourceID 指定按实体 ID 命中；空则 kind+能力过滤后
+  按优先级取首个，多个报 `ErrAmbiguousMedia/ErrAmbiguousChannel`
+- `Exec/Query*` 签名增加 `sourceID` 参数；`buildInstance` 变 service 方法（反查 DAO 加载绑定实体）
+- 变更触发重建：Bind/Unbind、UpdateMediaSource/UpdateChannelSource（sonic+MD5 对比 → 落库 →
+  反查 `ListAssetIDsByXxx` 重建全部绑定运行中资产）
+- 实体删除**在用拒绝**（`ErrMediaSourceInUse/ErrChannelSourceInUse`）；删资产清绑定防孤儿
+
+### HTTP CRUD
+
+- internal/api 增 `WithOperator(*operator.Service)` 注入；未注入则内部 `operator.CreateRuntime(WithDB(db))`
+  自建（ownDB=false 不重复关连接，Release 时释放）；operator 顶层包暴露 `Service` 类型别名
+- handler/operator.go：`/api/v1/operator/**` 全量路由（Auth 组内 + requireOperator 装配守卫）
+- response 新业务码：NotFound=10020 / InUse=10021 / NotRunning=10022 / Ambiguous=10023 / Unavailable=10024
+- `api/openapi.yaml` v1.3.0：operator tag + 11 端点 + schemas
+
+### 测试
+
+- service：三步流程生命周期 / 共享场景（两资产共用 SSH，各自独立连接）/ 同 kind 多绑定歧义 /
+  在用删除拒绝 / UpdateMediaSource 无变化跳过 / LoadEnabled 兜底
+- api e2e：登录 → 建媒介 → 建资产 → 绑定（幂等）→ 在用删除 10021 → 启用 → status → 解绑 → 删除 → 404

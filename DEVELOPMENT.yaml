@@ -40,10 +40,11 @@ directory_structure:
   internal/agent:  { purpose: Agent 编排 (业务层, 消费 adapter 事件), status: 待实现 }
   internal/api:    { purpose: HTTP API 模块 (gin), status: 已完成 }
   internal/operator:
-    purpose: 统一操作层 (资产聚合 4 媒介 ssh/telnet/pve/k8s + 4 通道 prometheus/loki/tempo/outline)
+    purpose: 统一操作层 (媒介/数据源实体 + 资产绑定, 4 媒介 ssh/telnet/pve/k8s + 4 通道 prometheus/loki/tempo/outline)
     status: 已完成
-    note: 资产为 agent/workflow 操作基本单位; 配置持久化 DB, 仅启用资产创建实例;
-      详见 docs/plan-operator.md 与 AGENT.md operator 章节
+    note: 三步创建流程 (建实体→建资产→绑定); 媒介可跨资产共享 (配置共享, 各资产独立连接);
+      仅启用资产创建实例; 同 kind 多绑定经 sourceID 精确路由;
+      HTTP CRUD 见 /api/v1/operator/**; 详见 docs/plan-operator.md 与 AGENT.md operator 章节
   internal/workflow: { purpose: 工作流 (业务层), status: 待实现 }
   infrastructure:  { purpose: 基础设施客户端 (postgres/redis/t2i), status: 已完成 }
   api:             { purpose: OpenAPI 接口文档 (openapi.yaml), note: 与代码包 internal/api 分离, 勿放错 }
@@ -228,13 +229,13 @@ status:
     - 飞书 WSS 长连接驱动 + 统一 Event 模型 + Runtime 生命周期
     - HTTP API (登录 / 双 Token 会话 / 改密, Redis 存储, 统一业务码响应)
     - 前端迁移 React 19, HeroUI 重构登录页
-    - operator 统一操作层 (资产聚合, 8 集成基础能力: ssh/telnet/pve/k8s + prometheus/loki/tempo/outline)
+    - operator 统一操作层 (媒介/数据源实体化 + 资产绑定共享, 8 集成基础能力,
+      HTTP CRUD /api/v1/operator/**)
   todo:
     - cmd/cobra 程序入口
     - config/viper 配置加载
     - internal/agent (消费 adapter 事件, 经 operator 操作资产)
     - internal/workflow
-    - operator 层 HTTP CRUD API (internal/api handler)
     - sql/ 迁移脚本, deployment/ 部署清单, CI 接入
 
 references:

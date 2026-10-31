@@ -44,8 +44,8 @@ internal/
       feishu/           飞书 WSS 长连接驱动（官方 SDK，含单测）
   agent/                Agent 编排（待实现）
   api/                  HTTP API 模块（gin，依赖注入）
-    runtime.go          CreateRuntime/ReleaseRuntime（Option: WithDB/WithRedis/WithAddr，默认 :8082）
-    handler/            gin 路由与请求处理（GenFinalResponse 统一输出，HTTP 恒 200）
+    runtime.go          CreateRuntime/ReleaseRuntime（Option: WithDB/WithRedis/WithAddr/WithOperator，默认 :8082）
+    handler/            gin 路由与请求处理（GenFinalResponse 统一输出，HTTP 恒 200; operator.go 资产管理）
     middleware/         gin 中间件（Auth 会话鉴权：Bearer AccessToken -> ctx 注入用户名）
     service/            业务层（bcrypt 密码加密 / 双 Token 会话管理 / 登录改密）
     cache/              Redis Token 存储（AccessToken 2h / RefreshToken 7d，原生 TTL）
@@ -165,9 +165,10 @@ OneBot 适配器要点：
 
 用户管理（单 admin 用户）与业务接口的 HTTP 接入层，依赖注入与 adapter 同风格：
 
-- **装配**：`CreateRuntime(WithDB(db), WithRedis(rdb), WithAddr(":8082"))` → Dao + TokenCache(Redis)
-  → Service → Handler → gin 路由 → `SetupUser`（AutoMigrate + 默认 admin 种子，`OnConflict DoNothing`
-  幂等）→ goroutine `ListenAndServe`。db/redis 未注入则自建 infrastructure 默认连接。
+- **装配**：`CreateRuntime(WithDB(db), WithRedis(rdb), WithAddr(":8082"), WithOperator(opSvc))` →
+  Dao + TokenCache(Redis) → Service → Handler → gin 路由 → `SetupUser`（AutoMigrate + 默认 admin 种子，
+  `OnConflict DoNothing` 幂等）→ goroutine `ListenAndServe`。db/redis 未注入则自建 infrastructure 默认连接；
+  operator 服务未注入则内部 `operator.CreateRuntime(WithDB(db))` 自建。
   `ReleaseRuntime()` 幂等优雅关停；`Engine()` 暴露 gin 引擎（测试/cmd 挂载）。
 - **分层约束**：handler 只做参数绑定与错误映射；bcrypt 加密、Token 签发/校验在 Service 层；
   Token 持久化在 cache 层（Redis）；Dao 只管 gorm。密码哈希不出 Service（`GetUserInfo` 返回前脱敏）。
@@ -178,7 +179,9 @@ OneBot 适配器要点：
   （旧 RT 立即作废防重放）；登出同时吊销双 Token。登录失败统一返回"用户名或密码错误"（防枚举）。
 - **接口**：`POST /api/v1/login`、`POST /api/v1/token/refresh`、`POST /api/v1/token/logout`（公开）；
   `GET /api/v1/user/info`、`PUT /api/v1/user/password`（走 `middleware.Auth(tokens)` 中间件：
-  `Authorization: Bearer <access_token>`，失败 401）。接口文档见 `internal/api/openapi.yaml`（OpenAPI 3.1）。
+  `Authorization: Bearer <access_token>`，失败 401）；`/api/v1/operator/**` 资产管理
+  （媒介/数据源实体 CRUD、资产 CRUD 与 enable/disable/status、绑定，见 operator 模块章节）。
+  接口文档见根目录 `api/openapi.yaml`（OpenAPI 3.1）。
 - **错误上抛（response 包，参考 CourseSelectionMS 模式）**：`Response` 实现 error 接口，
   业务错误全部为包级 var 集合（`OperationSuccess`=20000 / `UserNotExiOrWrongPwd`=10002 /
   `WrongPassword`=10001 / `EmptyToken`·`InvalidToken`=10016 / `InvalidRefresh`=10017 /
@@ -191,29 +194,47 @@ OneBot 适配器要点：
 
 ## operator 模块（internal/operator）
 
-统一操作层：将多个**操作媒介**（ssh/telnet/pve/k8s）与多个**数据通道**（prometheus/loki/tempo/outline）
-聚合为**资产**（Asset）——agent/workflow 操作的基本单位。模块骨架与 adapter 同构（顶层 runtime 组装，
+统一操作层：将独立的**操作媒介**（ssh/telnet/pve/k8s）与**数据通道**（prometheus/loki/tempo/outline）
+实体经绑定聚合为**资产**（Asset）——agent/workflow 操作的基本单位。模块骨架与 adapter 同构（顶层 runtime 组装，
 错误用 standard_go 模式：sentinel `ErrXxx` + `%w`，见 DEVELOPMENT.yaml）。
 
-- **资产模型**：`operator_assets` 表（uuid 主键 / 软删 / Tags+Metadata+Media+Channels 均为 JSON 列）。
-  媒介/通道配置存 kind→JSON 字符串，`modules.ParseMediaConfig/ParseChannelConfig` 解析为类型化 Config。
-  资产是用户数据：**只建表无种子行**（与 adapter 配置表的幂等种子不同）。
-- **实例生命周期（service/lifecycle.go）**：配置常驻 DB，**仅 Enabled=true 的资产创建实例**
-  （`AssetInstance{asset 快照, media map, channels map}`）。顺序约定：先落库再动内存；
-  `buildInstance` 单个媒介/通道构建失败**跳过并记日志**（部分能力缺失优于整体不可用）；
-  Enable 失败不回滚 enabled（保持未运行等重试）；UpdateAsset 走 sonic+MD5 对比 → 落库 → 运行中重建；
+- **三步创建流程**：① 创建媒介/数据源实体（`CreateMediaSource/CreateChannelSource`，全局唯一名 +
+  kind + Config JSON）→ ② 创建资产写明描述信息（`CreateAsset`，纯 name/description/docs/tags/metadata）→
+  ③ 绑定到资产（`BindAssetMedia/BindAssetChannel`，幂等）。同一媒介实体可绑定多个资产
+  （如同机 K8s 资产与 PVE 资产共用同一个 SSH）；**共享语义 v1 = 配置共享，各资产独立连接**
+  （避免引用计数，连接池留作扩展点）。
+- **数据模型**：5 张表（`operator_assets` / `operator_media_sources` / `operator_channel_sources` /
+  两张绑定表，绑定行联合唯一）。实体/资产均为 uuid 主键 + 软删 + 全局唯一 Name（软删不释放名字，
+  与 user_table 一致的项目级行为）。资产是用户数据：**只建表无种子行**。
+  Config 为 JSON 字符串，`modules.ParseMediaConfig/ParseChannelConfig` 解析为类型化 Config。
+- **实例生命周期（service/lifecycle.go）**：**仅 Enabled=true 的资产创建实例**
+  （`AssetInstance{asset 快照, media []boundMedia, channels []boundChannel}`，切片承载同 kind 多绑定）。
+  顺序约定：先落库再动内存；`buildInstance`（service 方法，反查 DAO）单个实体构建失败**跳过并记日志**
+  （部分能力缺失优于整体不可用）；Enable 失败不回滚 enabled（保持未运行等重试）；
   实例无 goroutine（SSH/Telnet 短连接，其余 HTTP 客户端），无 done/wg。
-- **路由语义（service/route.go，仿 adapter route）**：kind 指定则精确匹配（缺失报 `ErrNoMedia/ErrNoChannel`），
-  为空按预定义优先级自动选择（Exec: ssh → telnet），多个可选报 `ErrAmbiguousMedia/ErrAmbiguousChannel`，
-  能力缺失报 `ErrNoCapability`。
-- **统一 API（service/api.go）**：资产管理（Create/Get/List/Update/Delete/Enable/Disable/GetStatus，
-  tags 过滤为内存过滤）+ 高频操作便捷方法（`Exec/QueryMetrics/QueryRange/QueryLogs/SearchTraces/
-  GetTrace/SearchDocs/GetDoc`）+ 低频特化操作（`Media()/Channel()` 拿实例引用后由调用方断言能力接口，
-  如 pve 虚机启停）。
+- **变更触发重建**：`Bind/Unbind`（幂等）与 `UpdateMediaSource/UpdateChannelSource`（sonic+MD5 对比 →
+  落库 → 反查 `ListAssetIDsByXxx` 重建全部绑定的运行中资产）都会让运行中资产立即重建。
+  实体删除**在用拒绝**（`ErrMediaSourceInUse/ErrChannelSourceInUse`，先解绑再删）；
+  删资产清理其绑定行防孤儿。
+- **路由语义（service/route.go，仿 adapter route）**：选择参数 = `kind`（类型粗过滤，可选）+
+  `sourceID`（实体 ID 精确，可选）。sourceID 指定 → 按实体 ID 命中（未绑定报 `ErrNoMedia/ErrNoChannel`）；
+  为空 → kind 过滤 + 能力过滤后按预定义优先级取首个（Exec: ssh → telnet），多个可选报
+  `ErrAmbiguousMedia/ErrAmbiguousChannel`（同 kind 多绑定场景必须按 sourceID 选择），能力缺失报 `ErrNoCapability`。
+- **统一 API（service/api.go）**：实体管理（CRUD）+ 绑定（Bind/Unbind/List）+ 资产管理
+  （Create/Get/List/Update/Delete/Enable/Disable/GetStatus，tags 过滤为内存过滤）+ 高频操作便捷方法
+  （`Exec/QueryMetrics/QueryRange/QueryLogs/SearchTraces/GetTrace/SearchDocs/GetDoc`，均带 kind+sourceID 选择参数）+
+  低频特化操作（`Media()/Channel()` 拿实例引用后由调用方断言能力接口，如 pve 虚机启停）。
 - **能力接口（隐式匹配，实现与接口一字不差）**：media —— `CommandRunner`（ssh/telnet）、
   `VMOperator`（pve）、`K8sOperator`（k8s）；channel —— `MetricsQuerier`（prometheus）、`LogQuerier`（loki）、
   `TraceSearcher`（tempo）、`DocSearcher`（outline）。新增集成：实现接口 → `modules` 加 Config 与 Parse 分支 →
   service/factory.go 挂接 case。
+- **HTTP API**：`/api/v1/operator/**`（internal/api/handler/operator.go，Auth 组内）——
+  实体 CRUD（POST/GET 列表 + GET/PUT/DELETE :id）、资产 CRUD 与 enable/disable/status、
+  绑定（GET/POST/DELETE `/asset/{id}/media|channel`，body 携带 source_id）。
+  internal/api 经 `WithOperator(*operator.Service)` 注入，未注入则内部 `operator.CreateRuntime(WithDB(db))`
+  自建（经对方 Runtime API 交互，operator 顶层包暴露 `Service` 类型别名）。
+  operator sentinel → 业务码映射：NotFound=10020 / InUse=10021 / NotRunning=10022 / Ambiguous=10023
+  / Unavailable=10024，非法配置复用 RevDataError（接口文档见 `api/openapi.yaml`）。
 - **实现要点**：ssh —— x/crypto/ssh，Exec 短连接（v1 取舍），非零退出码是结果而非错误；telnet ——
   最小 RFC854 IAC 处理（`stripIAC` 表驱动单测），Prompt 正则可配；pve —— REST `/api2/json`
   `PVEAPIToken` 认证，`{"data":...}` 包裹解码，电源操作为异步任务不等待；k8s —— client-go，
